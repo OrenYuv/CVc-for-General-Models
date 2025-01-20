@@ -1,1 +1,691 @@
+import torch
+import torchvision
+import torchvision.transforms as transforms
+from torchvision.datasets import ImageFolder
+from torch._C import dtype
+
+from torch.utils.data import DataLoader
+from torch.utils.data import Dataset
+
+import torchvision.datasets as dset
+
+from functools import partial
+
+import os
+import zipfile
+
+from natsort import natsorted
+from PIL import Image
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+import csv
+from collections import namedtuple
+CSV = namedtuple("CSV", ["header", "index", "data"])
+
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+import copy
+
+from numpy.random import default_rng
+rng = default_rng()
+
+import pandas as pd
+
+
+!pip install --upgrade --no-cache-dir gdown
+import gdown
+
+!gdown --id 10lb95QoS1cy1GxYZQsLaxu6S-BTEeWSY
+
+
+from datetime import datetime
+from sklearn import metrics
+
+######## Enabling GPU:
+print(torch.cuda.device_count())
+print(torch.cuda.get_device_name(0))
+print(torch.cuda.is_available())
+
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+print(device)
+
+
+####### Access to CelebA Dataset is Required ############
+####### Two Options below for importing the data ########
+
+######### Option#1 - Direct download from the wedsite: ####################3
+# Root directory for the dataset
+data_root = 'data/celeba'
+
+# Path to download the dataset to
+download_path = f'{data_root}/img_align_celeba.zip'
+
+# Create required directories
+if not os.path.exists(data_root):
+  os.makedirs(data_root)
+  #os.makedirs(dataset_folder)
+
+
+with zipfile.ZipFile('/content/img_align_celeba_new1.zip', 'r') as ziphandler:
+  #ziphandler.extractall(dataset_folder)
+  ziphandler.extractall(data_root)
+
+img_folder = f'{data_root}/img_align_celeba'
+targets_folder = f'{data_root}/Targets'
+if not os.path.exists(targets_folder):
+  os.makedirs(targets_folder)
+
+url ='https://drive.google.com/uc?id=1yMJD3R3nc7FkxkuChYZAOevL8kObW5hx'
+download_path =f'{targets_folder}/list_attr_celeba.txt'
+gdown.download(url, download_path, quiet=False)
+
+#https://drive.google.com/file/d/1yMJD3R3nc7FkxkuChYZAOevL8kObW5hx/view?usp=drive_link
+
+
+url ='https://drive.google.com/uc?id=1O3ffC2jZWgkhCQ3XL8ku3PaWDP48uQFH'
+download_path =f'{targets_folder}/identity_CelebA.txt'
+gdown.download(url, download_path, quiet=False)
+######################################################################################################
+
+## Option#2 - Download from your own Drive: ##########################################################
+
+# Root directory for the dataset
+data_root = 'data/celeba'
+
+# Path to download the dataset to
+download_path = f'{data_root}/img_align_celeba.zip'
+
+# Create required directories
+if not os.path.exists(data_root):
+  os.makedirs(data_root)
+  #os.makedirs(dataset_folder)
+
+
+
+#with zipfile.ZipFile('/content/img_align_celeba_new1.zip', 'r') as ziphandler:
+with zipfile.ZipFile('/content/drive/MyDrive/CelebA_Data/img_align_celeba_new3.zip', 'r') as ziphandler:
+  #ziphandler.extractall(dataset_folder)
+  ziphandler.extractall(data_root)
+
+img_folder = f'{data_root}/img_align_celeba'
+targets_folder = '/content/drive/MyDrive/CelebA_Utils'
+##############################################################################################################
+
+
+################# Simulation:  ##############################################################################3
+##General Setting:
+batch_size = 20
+N=202599
+Nq=10000
+IMG_WIDTH = 178
+IMG_HEIGHT = 218
+
+#Net Architecture:
+C1= 32
+C2= 64
+C3=32
+C4=16
+Window_size=5
+Poolong_size=2
+P_Drop=0.5
+H=100
+
+#### Expiriment setting:
+nqtr=100
+nqte=900
+nqtot=nqtr+nqte
+
+H=300
+tau0=1
+
+Kf=  10 #num of folds
+Samp_size1= 20   # Number of random  samples
+Samp_size2= 200  #Wcv_Apprx main Loop
+Samp_size4=1000  #Wcv_Apprx inner Loop
+
+#Training:
+Epochs=80 #100
+EpochsB=8 #10
+k2=Epochs #Val freq
+
+## Create a custom Dataset class
+class CelebADataset(Dataset):
+  def __init__(self, root_dir, root_dir_Targets ,transform,N):
+    self.root_dir = root_dir
+    self.root_dir_Targets = root_dir_Targets
+    self.transform = transform
+
+    #landmarks_align = self._load_csv("list_landmarks_align_celeba.txt", header=1)
+    Attr = self._load_csv("list_attr_celeba.txt", header=1)
+
+    self.Smile = torch.maximum(Attr.data[0:N,31],torch.zeros(N))
+    #self.NoseY = landmarks_align.data[0:N,5]
+    self.image_names = Attr.index[0:N]
+
+    Identities_file= self._load_csv("identity_CelebA.txt", header=None)
+    self.Identities = Identities_file.data
+
+    ### Building metaData for Identities
+    Identities_Arr=self.Identities.numpy()
+    Table=np.zeros((Identities_Arr.max(),40)).astype(int)
+    for i in range(Table.shape[0]):
+      Ident=i+1
+      Table[i,0]=Ident
+      ListOfindx=np.where(Identities_Arr==Ident)[0]
+      L=len(ListOfindx)
+      Table[i,1:L+1]=ListOfindx
+      Table[i,39]=L
+
+    self.MasterTable =Table
+
+
+  def __len__(self):
+    return len(self.image_names)
+
+
+  def _load_csv(
+        self,
+        filename ,
+        header ,
+    ) -> CSV:
+        data, indices, headers = [], [], []
+
+        fn = partial(os.path.join, self.root_dir_Targets)
+        with open(fn(filename)) as csv_file:
+            data = list(csv.reader(csv_file, delimiter=' ', skipinitialspace=True))
+
+        if header is not None:
+            headers = data[header]
+            data = data[header + 1:]
+
+        indices = [row[0] for row in data]
+        data = [row[1:] for row in data]
+        data_int = [list(map(int, i)) for i in data]
+
+        return CSV( headers, indices, torch.tensor(data_int) )
+
+
+  def __getitem__(self, idx):
+    # Get the path to the image
+    img_path = os.path.join(self.root_dir, self.image_names[idx])
+    # Load image and convert it to RGB
+    img = Image.open(img_path).convert('RGB')
+    # Apply transformations to the image
+    if self.transform:
+      img = self.transform(img)
+
+    targrt=self.Smile[idx]
+
+    return img,targrt
+    #image_name=self.image_names[idx]
+    #return img,targrt,image_name
+
+
+  def __getIdentityItems__(self, Ident):
+    nj=self.MasterTable[Ident-1,39]
+    idxs=self.MasterTable[Ident-1,1:nj+1]
+    imgs=torch.zeros( (nj ,3,IMG_HEIGHT,IMG_WIDTH) )
+    targrts=torch.zeros( (nj ,1) )
+    for j in range(nj):
+      data=self.__getitem__(idxs[j])
+      imgs[j,:,:,:]=data[0]
+      targrts[j,0]=data[1]
+
+    return imgs,targrts
+
+  def __getItemsByIndices__(self, idxs):
+    nj=len(idxs)
+    imgs=torch.zeros( (nj ,3,IMG_HEIGHT,IMG_WIDTH) )
+    targrts=torch.zeros( (nj ,1) )
+    for j in range(nj):
+      data=self.__getitem__(idxs[j])
+      imgs[j,:,:,:]=data[0]
+      targrts[j,0]=data[1]
+
+    return imgs,targrts
+
+class Net(nn.Module):
+    def __init__(self ,input_shape=(3,IMG_HEIGHT, IMG_WIDTH)):
+        super(Net, self).__init__()
+        self.conv1 = nn.Conv2d(3, C1, Window_size)
+        self.conv2 = nn.Conv2d(C1, C2, Window_size)
+        self.conv3 = nn.Conv2d(C2, C3, Window_size)
+        self.conv4 = nn.Conv2d(C3, C4, Window_size)
+        self.pool = nn.MaxPool2d(Poolong_size, Poolong_size)
+
+        n_size = self._get_conv_output(input_shape)
+
+        self.fc1 = nn.Linear(n_size, H)
+        self.fc2 = nn.Linear(H, 1)
+
+        self.dropout = nn.Dropout(P_Drop)
+
+
+    def _get_conv_output(self, shape):
+      input = torch.autograd.Variable(torch.rand(10, *shape))
+      output_feat = self._forward_features(input)
+      n_size = output_feat.size(1)
+      return n_size
+
+    def _forward_features(self, x):
+      x = self.pool(F.relu(self.conv1(x)))
+      x = self.pool(F.relu(self.conv2(x)))
+      x = self.pool(F.relu(self.conv3(x)))
+      x = self.pool(F.relu(self.conv4(x)))
+      x = torch.flatten(x, 1)
+      return x
+
+
+    def forward(self, x):
+        x = self._forward_features(x)
+        x=self.dropout(x)
+        x = F.leaky_relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
+
+    def Semi_forward(self, x):
+
+        x = self._forward_features(x)
+        x = F.leaky_relu(self.fc1(x))
+        return x
+
+## Load the dataset
+transform = transforms.Compose([transforms.ToTensor(),transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+celeba_dataset = CelebADataset(img_folder,targets_folder, transform,N)
+Totloader  = torch.utils.data.DataLoader(celeba_dataset, batch_size=10, num_workers=2, shuffle=True)
+Master_Identities_Table=celeba_dataset.MasterTable
+Nq=Master_Identities_Table.shape[0]
+
+def FromFTableTo_Splited_IdentitiesTable_k(Fnum):
+  startindx=Fnum*Fsize
+  if Fnum<Kf-1:
+    endindx=startindx+Fsize
+  if Fnum==Kf-1:
+    endindx=ntr
+
+  va_id=np.arange(startindx,endindx)
+  F_Table_cv=F_Table[va_id,:]
+  F_Table_tr=np.delete(F_Table, va_id, axis=0)
+  Identities_Table_tr_k=np.zeros((nqtr,40)).astype(int)
+  Identities_Table_cv_k=np.zeros((nqtr,40)).astype(int)
+  Identities_Table_tr_k[:,0]=Identities_Table_tr[:,0]
+  Identities_Table_cv_k[:,0]=Identities_Table_tr[:,0]
+
+  for j in range(nqtr):
+    Ident=Identities_Table_tr[j,0]
+    ListOfindx=F_Table_tr[np.where(F_Table_tr[:,0]==Ident)[0],1]
+    L=len(ListOfindx)
+    Identities_Table_tr_k[j,1:L+1]=ListOfindx
+    Identities_Table_tr_k[j,39]=L
+
+    ListOfindx=F_Table_cv[np.where(F_Table_cv[:,0]==Ident)[0],1]
+    L=len(ListOfindx)
+    Identities_Table_cv_k[j,1:L+1]=ListOfindx
+    Identities_Table_cv_k[j,39]=L
+
+  return Identities_Table_tr_k, Identities_Table_cv_k, F_Table_cv
+
+
+
+def g(z):
+    return 1/(1+np.exp(-z)) ## Zigmoid
+
+def g_inv(z):
+    return np.log(z/(1-z)) ##Zigmoid_inv
+
+def g_tag(z):
+    return np.exp(-z)/(1+np.exp(-z))**2 ## Zigmoid-tag
+
+def G(z):
+    return np.log(1+np.exp(z)) ## Zigmoid Prime
+
+############ Full Simulation : #########################
+CV_Results=np.zeros(Samp_size1)
+CV_ZeroOne_Results=np.zeros(Samp_size1)
+Err_ZeroOne_Results=np.zeros(Samp_size1)
+
+Err_Results=np.zeros(Samp_size1)
+Err2_Results=np.zeros(Samp_size1)
+Wcv_Apprx_Results=np.zeros(Samp_size1)
+Wcv_ZeroOne_Apprx_Results=np.zeros(Samp_size1)
+
+lrGlob=0.0001
+lrPr=0.00001
+
+nGQ = 8
+x_ks, w_ks = np.polynomial.hermite.hermgauss(nGQ)
+
+for i1 in range(Samp_size1):
+  ################ Defining random sample out of the whole data set
+  Identities_Table_tot=celeba_dataset.MasterTable[rng.choice(range(Nq),size=nqtot, replace=False),:]
+  randOrder=np.random.permutation(nqtot)-1
+  Identities_Table_tot = Identities_Table_tot[randOrder,:]
+  Identities_Table_tr = Identities_Table_tot[0:nqtr,:]
+  Identities_Table_te = Identities_Table_tot[nqtr::,:]
+  ######## Flattening the trainng data for Folds splitting:
+  ntr=np.sum(Identities_Table_tr[:,39])
+  nte=np.sum(Identities_Table_te[:,39])
+  print('Training size: ',ntr)
+  print('Test size: ',nte)
+  F_Table=np.zeros((ntr,2)).astype(int)
+  c=0
+  for j in range(nqtr):
+    nj=Identities_Table_tr[j,39]
+    F_Table[c:c+nj,0]=np.zeros(nj)+Identities_Table_tr[j,0]
+    F_Table[c:c+nj,1]=Identities_Table_tr[j,1:nj+1]
+    c+=nj
+
+  randOrder=np.random.permutation(ntr)-1
+  F_Table=F_Table[randOrder,:]
+  Fsize=int(np.round(ntr/Kf))
+
+  ######## Training Once on the WholeData:
+  #### Init: ############################
+  net = Net()
+  net.to(device)
+  tau= tau0
+  #sig=10
+  tau2=torch.tensor(tau).float().requires_grad_(True)
+  optimizer =  optim.Adam( [ {'params':net.parameters()} , {'params': tau2 , 'lr': lrGlob}  ]   ,lr=lrPr)
+  ######### Trainig:
+  print('WholeData-Trainnig started at: ',datetime.now().strftime("%H:%M"))
+  net.train()
+
+  for epoch in range(Epochs):  # loop over the dataset multiple times
+    for j in range(nqtr):
+      nj=Identities_Table_tr[j,39]
+      if nj>0:
+        idxs=Identities_Table_tr[j,1:nj+1]
+        inputs, labels = celeba_dataset.__getItemsByIndices__(idxs)
+        inputs=inputs.to(device)
+        labels=labels.view(nj,1).float().to(device)
+        outputs = net.forward(inputs)
+
+        optimizer.zero_grad()
+        yf = labels.T@outputs
+        loss=torch.zeros((1,1)).to(device)
+
+        for k in range(nGQ):
+          sqrt2_sigb_xk = np.sqrt(2)*torch.sqrt(tau2)*x_ks[k]
+          y_sum_x = (torch.sum(labels) * sqrt2_sigb_xk).to(device)
+          log_gamma_sum = torch.sum(torch.log(1 + torch.exp(outputs + sqrt2_sigb_xk)))
+          loss = loss + torch.exp(yf + y_sum_x - log_gamma_sum) * w_ks[k] / np.sqrt(np.pi)
+
+        loss = -torch.log(loss)
+        loss.backward()
+        optimizer.step()
+    if epoch % k2 == k2-1:
+      with torch.no_grad():
+        net.eval()
+        OutErr=0
+        for j in range(nqte):
+          nj=Identities_Table_te[j,39]
+          idxs=Identities_Table_te[j,1:nj+1]
+          inputs, labels = celeba_dataset.__getItemsByIndices__(idxs)
+          inputs=inputs.to(device)
+          labels=labels.view(nj,1).float().to(device)
+
+          outputs = net.forward(inputs)
+          OutErr+=nn.BCEWithLogitsLoss(reduction='sum')(outputs, labels).item()
+
+        OutErr/=nte
+
+        InErr=0
+        for j in range(nqtr):
+          nj=Identities_Table_tr[j,39]
+          idxs=Identities_Table_tr[j,1:nj+1]
+          inputs, labels = celeba_dataset.__getItemsByIndices__(idxs)
+          inputs=inputs.to(device)
+          labels=labels.view(nj,1).float().to(device)
+
+          outputs = net.forward(inputs)
+          InErr+=nn.BCEWithLogitsLoss(reduction='sum')(outputs, labels).item()
+
+        InErr/=ntr
+
+        print(f'Ephoc {epoch + 1} Completed, Outloss: {OutErr:.3f},  Inloss: {InErr:.3f}')
+        net.train()
+
+      Err_i1=OutErr
+      Err_Results[i1]=Err_i1
+      print('tau2_hat:',tau2)
+  print('WholeData-Trainnig Completed, current time: ',datetime.now().strftime("%H:%M"))
+
+
+
+  ################# Working on the last layer To Calc Wcv and Wcv_Apprx:
+  print('Wcv_Apprx estimation started at: ',datetime.now().strftime("%H:%M"))
+  Sig_s_hat=np.sqrt(tau2.cpu().detach().numpy())
+  coefs=np.zeros((H+1,1))
+  layer = net.fc2
+  coefs[0,0]=layer.bias.cpu().detach().numpy()
+  coefs[1::,0]=layer.weight.cpu().detach().numpy()
+  Wcv_Apprx=0
+  Wcv_ZeroOne_Apprx=0
+
+  for Fnum in range(Kf):
+    Identities_Table_tr_1, Identities_Table_cv_1, F_Table_cv =FromFTableTo_Splited_IdentitiesTable_k(Fnum)
+    ntr1=np.sum(Identities_Table_tr_1[:,39])
+    ncv1=np.sum(Identities_Table_cv_1[:,39])
+
+    ########### Building Vtrinv and Xtr, Xte, Ztr, Zte:
+    Vtr_inv=np.zeros((ntr1,ntr1))
+    Xtr=np.zeros((ntr1,H))
+    Ztr=np.zeros((ntr1,nqtr))
+    Xcv=np.zeros((ncv1,H))
+    Zcv=np.zeros((ncv1,nqtr))
+
+    with torch.no_grad():
+      net.eval()
+      startIndx=0
+      for j in range(nqtr):
+          nj=Identities_Table_tr_1[j,39]
+          if nj>0:
+            EndIndx=startIndx+nj
+            idxs=Identities_Table_tr_1[j,1:nj+1]
+            inputs = celeba_dataset.__getItemsByIndices__(idxs)[0]
+            inputs=inputs.to(device)
+            Xtr[startIndx:EndIndx,:]=( net.Semi_forward(inputs) ).cpu().detach().numpy()
+            Ztr[startIndx:EndIndx,j]=np.ones(nj)
+            startIndx+=nj
+
+      startIndx=0
+      for j in range(nqtr):
+          nj=Identities_Table_cv_1[j,39]
+          if nj>0:
+            EndIndx=startIndx+nj
+            idxs=Identities_Table_cv_1[j,1:nj+1]
+            inputs = celeba_dataset.__getItemsByIndices__(idxs)[0]
+            inputs=inputs.to(device)
+            Xcv[startIndx:EndIndx,:]=( net.Semi_forward(inputs) ).cpu().detach().numpy()
+            Zcv[startIndx:EndIndx,j]=np.ones(nj)
+            startIndx+=nj
+
+
+    PHItr=np.column_stack((np.ones(ntr1), Xtr))
+    LPtr =PHItr@coefs
+    PHIte=np.column_stack((np.ones(ncv1), Xcv))
+    LPte =PHIte@coefs
+
+
+    MusMat=np.zeros((ntr1,Samp_size4))
+    Dvec=np.zeros(ntr1)
+    for i4 in range(Samp_size4):
+      Stilde=np.reshape(rng.standard_normal(nqtr)*Sig_s_hat, (nqtr,1) )
+      MUbtr=np.reshape(LPtr+Ztr@Stilde,ntr1 )
+      MusMat[:,i4] = g(MUbtr)
+      Dvec+=g_tag(MUbtr)
+
+    Dvec/=Samp_size4
+    Dtr=np.diag(Dvec)
+
+    MusVec=np.mean(MusMat,axis=1)
+
+    Vtr_inv=np.zeros((ntr1,ntr1))
+    Vtr=np.zeros((ntr1,ntr1))
+    startIndx=0
+    for j in range(nqtr):
+        nj=Identities_Table_tr_1[j,39]
+        if nj>1:
+          EndIndx=startIndx+nj
+          COVj=np.cov(MusMat[startIndx:EndIndx,:])
+          Vtr[startIndx:EndIndx,startIndx:EndIndx]=COVj+Dtr[startIndx:EndIndx,startIndx:EndIndx]
+          Vtr_inv[startIndx:EndIndx,startIndx:EndIndx]= np.linalg.inv(COVj+Dtr[startIndx:EndIndx,startIndx:EndIndx])
+          startIndx+=nj
+        if nj==1:
+          Vtr_inv[startIndx,startIndx]=1/( np.var(MusMat[startIndx,:])+Dtr[startIndx,startIndx] )
+          startIndx+=1
+
+
+    Hmat=PHIte@np.linalg.inv(PHItr.T@Dtr@Vtr_inv@Dtr@PHItr)@PHItr.T@Dtr@Vtr_inv
+    C_mat_Approx=np.zeros((Samp_size2,3,ncv1))
+
+    for i2 in range(Samp_size2):
+      Stilde=np.reshape(rng.standard_normal(nqtr)*Sig_s_hat, (nqtr,1) )
+      MUbte=g(LPte+Zcv@Stilde)
+      C_mat_Approx[i2,0,:]=np.reshape(MUbte, ncv1)
+
+
+      MUbtr=g(LPtr+Ztr@Stilde)
+      C_mat_Approx[i2,1,:]=np.reshape(Hmat@MUbtr, ncv1)
+
+
+      Ytr_b= (np.random.uniform(size=ntr1) <  np.reshape(MUbtr, ntr1)   ).astype(np.float64)
+      LPte_kb_Approx=LPte+Hmat@(np.reshape(Ytr_b-MusVec,(ntr1,1)))
+      C_mat_Approx[i2,2,:]= np.reshape(2*(LPte_kb_Approx>=0), ncv1)
+
+    for f in range(ncv1):
+      COV_mat=np.cov(C_mat_Approx[:,:,f],rowvar=False)
+      Wcv_Apprx+=COV_mat[0,1]
+      Wcv_ZeroOne_Apprx+=COV_mat[0,2]
+
+  Wcv_Apprx=Wcv_Apprx/ntr
+  Wcv_ZeroOne_Apprx=Wcv_ZeroOne_Apprx/ntr
+
+  Wcv_Apprx_Results[i1]=Wcv_Apprx
+  Wcv_ZeroOne_Apprx_Results[i1]=Wcv_ZeroOne_Apprx
+
+  print('Wcv and Wcv_Apprx estimation Completed at: ',datetime.now().strftime("%H:%M"))
+
+
+  ################ CV and Err2 estimation for the Given random sample:
+  print('CV and Err2 estimation started at: ',datetime.now().strftime("%H:%M"))
+  CV_i1=0
+  Err2_i1=0
+  LP_te=np.zeros(nte)
+  Yte=np.zeros(nte)
+
+  CV_ZeroOne_i1=0
+  Err_ZeroOne_i1=0
+
+  for Fnum in range(Kf):
+    Identities_Table_tr_1, Identities_Table_cv_1 , F_Table_cv =FromFTableTo_Splited_IdentitiesTable_k(Fnum)
+    ncv1=np.sum(Identities_Table_cv_1[:,39])
+    LP_te_indx=0
+    net = Net()
+    net.to(device)
+    tau=tau0 #1.5  #Sig_s_hat #1.3
+    tau2=torch.tensor(tau).float().requires_grad_(True)
+    optimizer =  optim.Adam( [ {'params':net.parameters()} , {'params': tau2 , 'lr': lrGlob}  ]   ,lr=lrPr)
+    net.train()
+    for epoch in range(Epochs):  # loop over the dataset multiple times
+      for j in range(nqtr):
+        nj=Identities_Table_tr_1[j,39]
+        if nj>0:
+          idxs=Identities_Table_tr_1[j,1:nj+1]
+          inputs, labels = celeba_dataset.__getItemsByIndices__(idxs)
+          inputs=inputs.to(device)
+          labels=labels.view(nj,1).float().to(device)
+          outputs = net.forward(inputs)
+          optimizer.zero_grad()
+          yf = labels.T@outputs
+          loss=torch.zeros((1,1)).to(device)
+
+          for k in range(nGQ):
+            sqrt2_sigb_xk = np.sqrt(2)*torch.sqrt(tau2)*x_ks[k]
+            y_sum_x = (torch.sum(labels) * sqrt2_sigb_xk).to(device)
+            log_gamma_sum = torch.sum(torch.log(1 + torch.exp(outputs + sqrt2_sigb_xk)))
+            loss = loss + torch.exp(yf + y_sum_x - log_gamma_sum) * w_ks[k] / np.sqrt(np.pi)
+
+          loss = -torch.log(loss)     # == NLL(outputs, labels)
+          loss.backward()
+          optimizer.step()
+
+
+    with torch.no_grad():
+      net.eval()
+      OutErr=0
+      for j in range(nqte):
+        nj=Identities_Table_te[j,39]
+        idxs=Identities_Table_te[j,1:nj+1]
+        inputs, labels = celeba_dataset.__getItemsByIndices__(idxs)
+        inputs=inputs.to(device)
+        labels=labels.view(nj,1).float().to(device)
+        outputs = net.forward(inputs)
+        OutErr+=nn.BCEWithLogitsLoss(reduction='sum')(outputs, labels,).item()
+        LP_te[LP_te_indx:LP_te_indx+nj]=np.reshape(outputs.cpu().detach().numpy(),nj)
+        Yte[LP_te_indx:LP_te_indx+nj]=np.reshape(labels.cpu().detach().numpy(),nj)
+        LP_te_indx+=nj
+
+
+      OutErr/=nte
+      Err_ZeroOne_i1+=np.mean(Yte!=(LP_te>=0))
+
+
+
+      idxs=F_Table_cv[:,1]
+      inputs, labels = celeba_dataset.__getItemsByIndices__(idxs)
+      inputs=inputs.to(device)
+      labels=labels.view(len(idxs),1).float().to(device)
+      outputs = net.forward(inputs)
+      CV=nn.BCEWithLogitsLoss(reduction='mean')(outputs, labels).item()
+
+      LP_CV=np.reshape(outputs.cpu().detach().numpy(),ncv1)
+      Ycv=np.reshape(labels.cpu().detach().numpy(),ncv1)
+
+      CV_ZeroOne_i1+=np.sum(Ycv!=(LP_CV>=0))
+
+
+      print(f'Fold {Fnum + 1} Completed, CVest: {CV:.3f}')
+      print('Time: ',datetime.now().strftime("%H:%M"))
+
+
+
+    Err2_i1+=OutErr
+    CV_i1+=CV
+
+
+  CV_Results[i1]=CV_i1/Kf
+  Err2_Results[i1]=Err2_i1/Kf
+  CV_ZeroOne_Results[i1]=CV_ZeroOne_i1/ntr
+  Err_ZeroOne_Results[i1]=Err_ZeroOne_i1/Kf
+
+
+  print(f'Outloss2: {Err2_Results[i1]:.3f}')
+  print(f'CV: {CV_Results[i1]:.3f}')
+  print(f'Wcv_Apprx: {Wcv_Apprx_Results[i1]:.3f}')
+
+  print(f'Outloss_ZeroOne: {Err_ZeroOne_Results[i1]:.3f}')
+  print(f'CV_ZeroOne: {CV_ZeroOne_Results[i1]:.3f}')
+  print(f'Wcv_ZeroOne_Apprx: {Wcv_ZeroOne_Apprx_Results[i1]:.3f}')
+
+  print(f'Sample {i1 + 1} Completed')
+
+  #### Data saving during the Run:
+  CV_Results_t=np.reshape(CV_Results,(Samp_size1,1))
+  Err2_Results_t=np.reshape(Err2_Results,(Samp_size1,1))
+  Wcv_Apprx_Results_t=np.reshape(Wcv_Apprx_Results,(Samp_size1,1))
+
+  CV_ZeroOne_Results_t=np.reshape(CV_ZeroOne_Results,(Samp_size1,1))
+  Err_ZeroOne_Results_t=np.reshape(Err_ZeroOne_Results,(Samp_size1,1))
+  Wcv_ZeroOne_Apprx_Results_t=np.reshape(Wcv_ZeroOne_Apprx_Results,(Samp_size1,1))
+
+  data=np.hstack((Err2_Results_t,CV_Results_t,Wcv_Apprx_Results_t,Err_ZeroOne_Results_t,CV_ZeroOne_Results_t,Wcv_ZeroOne_Apprx_Results_t))
+  np.savetxt('/content/drive/MyDrive/Results/CelebA_Smile_CVc/CelebA_Smile_CVc_Batch1_temp.csv', data , delimiter=",")
+
+print('Simulation Completed, current time: ',datetime.now().strftime("%H:%M"))
+
 
