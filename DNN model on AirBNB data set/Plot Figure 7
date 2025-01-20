@@ -1,1 +1,93 @@
+### Importing the required libraries and methods
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import math
+import datetime as dt
 
+import csv
+from collections import namedtuple
+CSV = namedtuple("CSV", ["header", "index", "data"])
+import pandas as pd
+
+
+######################### Importing the stored results ###########################
+
+data = ( pd.concat(map(functools.partial(pd.read_csv, header=None), glob.glob('/content/drive/MyDrive/Results/AirBNB_CVc/*.csv'))) ).to_numpy()
+
+
+
+####Removing outlayers
+data[~np.isfinite(data)] ='NaN'
+data=data[~np.isnan(data).any(axis=1),:]
+data=data[~(data==0).any(axis=1),:]
+print(data.shape)
+
+for j in range(data.shape[1]):
+  Sample=data[:,j]
+  m=np.mean(Sample)
+  Treshold=3*np.std(Sample)
+  L=len(Sample)
+  OutLayers=[]
+  for i in range(L):
+    if np.abs(Sample[i]-m)>Treshold:
+      OutLayers.append(i)
+
+  data=np.delete(data,OutLayers,axis=0)
+  print(data.shape)
+
+CV_Results=   data[:,1]
+Wcv_Apprx_Results= data[:,2]
+Err2_Results=data[:,0]
+TestErr_mean= np.mean(Err2_Results)
+
+ACCU_hat_Results=   data[:,4]
+Wcv_ACCU_Apprx_Results= data[:,5]
+ACCU2_Results=data[:,3]
+
+
+plt.figure(figsize=(12,5))
+
+plt.subplot(121)
+sns.kdeplot(CV_Results, color='blue')
+CV_Apprx_corr=CV_Results+Wcv_Apprx_Results
+
+sns.kdeplot(CV_Apprx_corr, color='green')
+sns.kdeplot(Err2_Results, color='black',linestyle='dotted')
+
+plt.legend(labels=['CV',r'$\widetilde{CV}_c$','Gen-Err'])
+plt.title('Cross-entropy Loss', fontsize=12 )
+
+plt.axvline(x=np.nanmean(CV_Results),linewidth=2, color='blue')
+plt.axvline(x=np.mean(CV_Apprx_corr),linewidth=1.5, color='green')
+plt.axvline(x=np.mean(Err2_Results),linewidth=2, color='black',linestyle='dotted')
+
+
+cent=np.mean(CV_Apprx_corr)
+width=0.07
+plt.yticks([])
+plt.xlim(cent-width,cent+width)
+plt.xlabel('Error', fontsize=10)
+
+
+
+plt.subplot(122)
+ACCU_Apprx_corr_Results=ACCU_hat_Results+Wcv_ACCU_Apprx_Results
+
+sns.kdeplot(ACCU_hat_Results, color='blue')
+sns.kdeplot(ACCU_Apprx_corr_Results, color='green')
+sns.kdeplot(ACCU2_Results, color='black',linestyle='dotted')
+
+plt.legend(labels=['CV',r'$\widetilde{CV}_c$','Gen-Err'])
+plt.title('Zero-One Loss', fontsize=12 )
+
+plt.axvline(x=np.nanmean(ACCU_hat_Results),linewidth=2, color='blue')
+plt.axvline(x=np.nanmean(ACCU_Apprx_corr_Results),linewidth=1.5, color='green')
+plt.axvline(x=np.mean(ACCU2_Results),linewidth=2, color='black',linestyle='dotted')
+
+
+cent=np.nanmean(ACCU2_Results)
+width=0.035
+plt.yticks([])
+plt.xlim(cent-width,cent+width)
+plt.xlabel('Error', fontsize=10)
