@@ -1,1 +1,11 @@
-CelebA_Smile_CVc
+
+
+
+
+
+
+######################### Importing the stored results ###########################
+
+data = ( pd.concat(map(functools.partial(pd.read_csv, header=None), glob.glob('/content/drive/MyDrive/Results/CelebA_Smile_CVc/*.csv'))) ).to_numpy()
+
+
