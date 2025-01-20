@@ -1,1 +1,778 @@
+### Importing the required libraries and methods
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import math
+import datetime as dt
+import torch
+from functools import partial
+
+import os
+import zipfile
+from natsort import natsorted
+from PIL import Image
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+import csv
+from collections import namedtuple
+CSV = namedtuple("CSV", ["header", "index", "data"])
+
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+import copy
+
+from numpy.random import default_rng
+rng = default_rng()
+
+import pandas as pd
+
+from datetime import datetime
+from sklearn import metrics
+import scipy.linalg
+
+##################### Download the datasets in advance and improt them to the runtime ###############
+
+####### Setting:
+##General:
+batch_size = 20
+N=49975
+Nq=10000
+IMG_WIDTH = 178
+IMG_HEIGHT = 218
+
+#Net Architecture:
+C1= 32
+C2= 64
+C3=32
+C4=16
+Window_size=5
+Poolong_size=2
+P_Drop=0.5
+H=100
+
+#### My Expiriment setting:
+TrainDistance=0.05
+y_name='Hot_water'
+nqtr=100
+nqte=500
+nqtot=nqtr+nqte
+
+
+H=300
+tau0= 1
+delta0=1
+
+Kf=  10 #num of folds
+Samp_size1=  20
+Samp_size3= 20   #Wcv main Loop
+
+#Training:
+EpochsNet= 200
+EpochsTune= 10
+EpochsB= 100
+
+
+filename1 = '/content/drive/MyDrive/Datasets/AirBNBlistings_cleaned_Part1.csv'
+filename2 = '/content/drive/MyDrive/Datasets/AirBNBlistings_cleaned_Part2.csv'
+data1 = pd.read_csv(filename1)
+data2 = pd.read_csv(filename2)
+data_Full=pd.concat([data1,data2],ignore_index=True)
+
+### Removing values of cancellation policies other then "strict_14_with_grace_period"
+data_Full=data_Full.drop(['flexible','long_term','moderate','strict','super_strict_30','super_strict_60'],axis=1)
+
+### Removing irrelevant cols:
+data_Full=data_Full.drop(['id','host_id','host_has_profile_pic','is_business_travel_ready','nan_verification','Unnamed: 0'],axis=1)
+
+ListOFnonRellevantCols=[]
+for j in range(data_Full.shape[1]):
+  if j>29:
+    col_name=data_Full.iloc[:,j].name
+    m=data_Full.iloc[:,j].mean()
+    if m>0.99 or m<0.01:
+      #print(col_name,' : ',m)
+      #data_Full=data_Full.drop([col_name],axis=1)
+      ListOFnonRellevantCols.append(col_name)
+
+data_Full=data_Full.drop(ListOFnonRellevantCols,axis=1)
+#print(col_name,' : ',m)
+print(data_Full.shape[1])
+p=data_Full.shape[1]-3
+
+for j in range(data_Full.shape[1]):
+  if j>29:
+    col_name=data_Full.iloc[:,j].name
+    m=data_Full.iloc[:,j].mean()
+    if m>0.3 and m<0.7:
+      print(col_name,' : ',m)
+
+
+
+### Simple DNN p-HL-1:
+H1=100
+H2=800
+H3=400
+H4=20
+LR_f= nn.LeakyReLU(0.1)
+
+class Net(nn.Module):
+    def __init__(self):
+        super(Net, self).__init__()
+        self.fc1 = nn.Linear(p,H1)
+        #self.fc2 = nn.Linear(H1,H2)
+        #self.fc3 = nn.Linear(H2,H3)
+        self.fc4 = nn.Linear(H1,H4)
+        self.fc5 = nn.Linear(H4,1, bias=True )  #bias=False
+
+        U=1/np.sqrt(p)
+        self.fc1.weight.data.uniform_(-U, U)
+        self.fc1.bias.data.fill_(0)
+
+        U=1/np.sqrt(2*H1)
+        self.fc4.weight.data.uniform_(-U, U)
+        self.fc4.bias.data.fill_(0)
+
+        U=1/np.sqrt(2*H2)
+        self.fc5.weight.data.uniform_(-U, U)
+        self.fc5.bias.data.fill_(0)
+
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
+        #x = F.relu(self.fc2(x))
+        #x = F.relu(self.fc3(x))
+        x = F.relu(self.fc4(x))
+        #x = LR_f(self.fc4(x))
+        x = self.fc5(x)
+        return x
+
+
+
+nGQ =5
+x_ks, w_ks = np.polynomial.hermite.hermgauss(nGQ)
+Wthreshold=np.exp(-4.8)
+WsXsList=[]
+for ks1 in range(nGQ):
+  for ks2 in range(nGQ):
+    if w_ks[ks1]*w_ks[ks2]>Wthreshold:
+      WsXsList.append([ w_ks[ks1]*w_ks[ks2],x_ks[ks1],x_ks[ks2]])
+
+WsXsArr=np.array(WsXsList)
+print(WsXsArr.shape)
+
+nGQ2=WsXsArr.shape[0]
+
+w_ks=np.reshape(w_ks,(nGQ,1))
+CrossMat=w_ks@w_ks.T
+
+
+def g(z):
+    return 1/(1+np.exp(-z)) ## Zigmoid
+
+def g_inv(z):
+    return np.log(z/(1-z)) ##Zigmoid_inv
+
+def g_tag(z):
+    return np.exp(-z)/(1+np.exp(-z))**2 ## Zigmoid-tag
+
+def G(z):
+    return np.log(1+np.exp(z)) ## Zigmoid Prime
+
+MeanLat=data_Full.latitude.mean()
+
+
+
+CV_Results=np.zeros(Samp_size1)
+CV_ZeroOne_Results=np.zeros(Samp_size1)
+Err_ZeroOne_Results=np.zeros(Samp_size1)
+
+Err_Results=np.zeros(Samp_size1)
+Err2_Results=np.zeros(Samp_size1)
+
+Wcv_ZeroOne_Results=np.zeros(Samp_size1)
+Wcv_Results=np.zeros(Samp_size1)
+
+
+for i1 in range(Samp_size1):  ###Main Loop
+  ############################### Random Block-Clustered training and test sets
+  data_Full_Temp=data_Full.copy()
+  qt=1
+  BlocksizeNow=0
+  njVec=np.zeros(nqtr)
+  while BlocksizeNow<5:
+    Nnow=len(data_Full_Temp)
+    Pivotindex=np.random.randint(0,Nnow-1)
+    PivotLat=data_Full_Temp.latitude.iloc[Pivotindex]
+    PivotLon=data_Full_Temp.longitude.iloc[Pivotindex]
+    data_Full_Temp['Dis']= (np.sqrt( (data_Full_Temp.latitude-PivotLat)**2+((data_Full_Temp.longitude-PivotLon)*np.cos(np.pi*MeanLat/180))**2 ))*60
+
+    BlocksizeNow=len(data_Full_Temp[data_Full_Temp.Dis<TrainDistance])
+    #print(BlocksizeNow)
+
+    data_Train=data_Full_Temp[data_Full_Temp.Dis<TrainDistance]
+    data_Train.reset_index
+    data_Train['blockNum']=0
+    njVec[0]=BlocksizeNow
+    data_Full_Temp=data_Full_Temp[data_Full_Temp.Dis>=TrainDistance]
+    data_Full_Temp.reset_index
+
+    Nnow=len(data_Full_Temp)
+    Pivotindex=np.random.randint(0,Nnow-1)
+    PivotLat=data_Full_Temp.latitude.iloc[Pivotindex]
+    PivotLon=data_Full_Temp.longitude.iloc[Pivotindex]
+    data_Full_Temp['Dis']= (np.sqrt( (data_Full_Temp.latitude-PivotLat)**2+((data_Full_Temp.longitude-PivotLon)*np.cos(np.pi*MeanLat/180))**2 ))*60
+    data_Test=data_Full_Temp[data_Full_Temp.Dis<TrainDistance]
+    data_Test.reset_index
+    data_Full_Temp=data_Full_Temp[data_Full_Temp.Dis>=TrainDistance]
+    data_Full_Temp.reset_index
+
+  while qt<nqtr:
+    Nnow=len(data_Full_Temp)
+    Pivotindex=np.random.randint(0,Nnow-1)
+    PivotLat=data_Full_Temp.latitude.iloc[Pivotindex]
+    PivotLon=data_Full_Temp.longitude.iloc[Pivotindex]
+    data_Full_Temp['Dis']= (np.sqrt( (data_Full_Temp.latitude-PivotLat)**2+((data_Full_Temp.longitude-PivotLon)*np.cos(np.pi*MeanLat/180))**2 ))*60
+    #print(len(data_Full_Temp[data_Full_Temp.Dis<TrainDistance]))
+
+    DataSlice=data_Full_Temp[data_Full_Temp.Dis<TrainDistance]
+    DataSlice.reset_index
+    BlocksizeNow=len(DataSlice)
+    if BlocksizeNow>5:
+      DataSlice['blockNum']=qt
+      data_Train=pd.concat([data_Train,DataSlice],ignore_index=True)
+      data_Full_Temp=data_Full_Temp[data_Full_Temp.Dis>=TrainDistance]
+      data_Full_Temp.reset_index
+      njVec[qt]=BlocksizeNow
+      qt=qt+1
+
+
+      for qe in range(3):
+        Nnow=len(data_Full_Temp)
+        Pivotindex=np.random.randint(0,Nnow-1)
+        PivotLat=data_Full_Temp.latitude.iloc[Pivotindex]
+        PivotLon=data_Full_Temp.longitude.iloc[Pivotindex]
+        data_Full_Temp['Dis']= (np.sqrt( (data_Full_Temp.loc[:,'latitude']-PivotLat)**2+((data_Full_Temp.loc[:,'longitude']-PivotLon)*np.cos(np.pi*MeanLat/180))**2 ))*60
+        data_Test=pd.concat([data_Test,data_Full_Temp[data_Full_Temp.Dis<TrainDistance]],ignore_index=True)
+        data_Full_Temp=data_Full_Temp[data_Full_Temp.Dis>=TrainDistance]
+        data_Full_Temp.reset_index
+
+
+
+  ntr=len(data_Train)
+  nte=len(data_Test)
+  print('Training size: ',ntr)
+  print('Test size: ',nte)
+
+  ####### Defining Tensors:
+  data_Train_X= torch.tensor( (data_Train.drop([y_name,'Dis','latitude','longitude','blockNum'],axis=1)).values, dtype=torch.float)
+  data_Train_Y= torch.tensor( (data_Train[y_name]).values, dtype=torch.float)
+  data_Train_Z= torch.tensor( (data_Train['blockNum']).values, dtype=torch.float)
+
+
+
+  data_Test_X=torch.tensor( (data_Test.drop([y_name,'Dis','latitude','longitude'],axis=1)).values, dtype=torch.float)
+  data_Test_Y=torch.tensor( ( data_Test[y_name]).values, dtype=torch.float)
+
+
+  data_Train_Lat=torch.tensor( (data_Train.latitude).values, dtype=torch.float)
+  data_Train_Lon=torch.tensor( (data_Train.longitude).values, dtype=torch.float)
+  data_Train_Y=data_Train_Y.view(ntr,1)
+  data_Test_Y = data_Test_Y.view(nte,1)
+
+
+  print(data_Train_Y.mean(0))
+  print(data_Test_Y.mean(0))
+
+  ######## Training Once on the WholeData:
+  ### Shuffeling the blocks
+  Mainperm=torch.randperm(ntr)
+  Xdata_tensor=data_Train_X[Mainperm].requires_grad_(False)  # .clone().detach()# torch.tensor(data_Train_X[perm]).float().requires_grad_(False)
+  ydata_tensor=data_Train_Y[Mainperm].requires_grad_(False)
+  data_Train_Lat_tensor=data_Train_Lat[Mainperm]
+  data_Train_Lon_tensor=data_Train_Lon[Mainperm]
+
+  ## Init:
+  lrPr=10**(-4)
+  net = Net()
+  optimizer =  optim.Adam( net.parameters()   ,lr=lrPr)
+  optimizer.zero_grad()
+
+  Epochs=EpochsNet
+  batch_size=100
+
+  ######### Trainig:
+  print(f'Full-data Trainnig started at: ',datetime.now().strftime("%H:%M"))
+  for epoch in range(Epochs):
+    perm=torch.randperm(ntr)
+    X_train_e=Xdata_tensor[perm].requires_grad_(False)  # .clone().detach()# torch.tensor(data_Train_X[perm]).float().requires_grad_(False)
+    Y_train_e=ydata_tensor[perm].requires_grad_(False)
+    for b in range(ntr//batch_size):
+      inputs=X_train_e[b*batch_size:(b+1)*batch_size,:]
+      labels=Y_train_e[b*batch_size:(b+1)*batch_size,:]
+
+      optimizer.zero_grad()
+      outputs = net.forward(inputs)
+      loss=nn.BCEWithLogitsLoss(reduction='mean')(outputs, labels)
+
+      loss.backward()
+      optimizer.step()
+
+    inputs=X_train_e[(b+1)*batch_size::,:]
+    labels=Y_train_e[(b+1)*batch_size::,:]
+    optimizer.zero_grad()
+    outputs = net.forward(inputs)
+    loss=nn.BCEWithLogitsLoss(reduction='mean')(outputs, labels)
+    loss.backward()
+    optimizer.step()
+
+  ################# Optimzing RE parameters: ###########
+  lrGlob=10**(-6)
+  tau= tau0
+  delta=delta0
+  tau2_hat=torch.tensor(tau).float().requires_grad_(True)
+  delta_hat=torch.tensor(delta).float().requires_grad_(True)
+  optimizer =  optim.Adam( [ {'params': tau2_hat }, {'params': delta_hat }  ]   ,lr=lrGlob)
+  Epochs=EpochsTune
+  MultiBatchSize=10
+  batch_size=2
+  optimizer.zero_grad()
+  with torch.no_grad():
+    outputs_Fixed=net.forward(Xdata_tensor)
+
+  for epoch in range(Epochs):
+    ################ Random orderring:
+    perm=torch.randperm(ntr)
+    Ydata_RE_train=ydata_tensor[perm].detach().numpy()
+    outputs_RE_train=outputs_Fixed[perm].detach().numpy()
+    Latdata=data_Train_Lat_tensor[perm].detach().numpy()
+    Londata=data_Train_Lon_tensor[perm].detach().numpy()
+
+    for b in range(ntr//batch_size):
+      Batch_id=np.array([b*batch_size,b*batch_size+1])
+
+      labels=Ydata_RE_train[Batch_id,:]
+      Batch_Dis= (np.sqrt( (Latdata[Batch_id[0]]-Latdata[Batch_id[1]])**2+((Londata[Batch_id[0]]-Londata[Batch_id[1]])*np.cos(np.pi*MeanLat/180))**2 ))*60
+      Batch_Rho=torch.exp((-1)*delta_hat*Batch_Dis)
+      Aterm=torch.sqrt(2*tau2_hat)*(torch.sqrt(1+Batch_Rho)+torch.sqrt(1-Batch_Rho))/2
+      Bterm=torch.sqrt(2*tau2_hat)*(torch.sqrt(1+Batch_Rho)-torch.sqrt(1-Batch_Rho))/2
+      outputs = outputs_RE_train[Batch_id,:]
+      yf = np.sum(labels*outputs)
+      loss=torch.zeros((1,1))
+      for ks in range(nGQ2):
+          xks1=Aterm*WsXsArr[ks,1]+Bterm*WsXsArr[ks,2]
+          xks2=Bterm*WsXsArr[ks,1]+Aterm*WsXsArr[ks,2]
+          #sqrt2_sigb_xk = np.sqrt(2)  *x_ks[k]
+          y_sum_x = labels[0,0]*xks1 + labels[1,0]*xks2                                                                   # (torch.sum(labels) * sqrt2_sigb_xk)   #.to(device)
+          log_gamma_sum = torch.log(1 + torch.exp(outputs[0,0] + xks1)) +  torch.log(1 + torch.exp(outputs[1,0] + xks2))
+          loss = loss +( torch.exp(yf + y_sum_x - log_gamma_sum) * WsXsArr[ks,0]) / np.pi
+
+      loss = -torch.log(loss)
+      loss.backward()
+
+      if (b+1)%MultiBatchSize==0:
+        optimizer.step()
+        optimizer.zero_grad()
+
+
+  print('RE params Tunning Completed, current time: ',datetime.now().strftime("%H:%M"))
+  print('tau2_hat:',tau2_hat)
+  print('delta_hat:',delta_hat)
+
+  ############ Fine-tunnig the model with the model with the RE params:
+  tau2_c=tau2_hat.detach().numpy()
+  delta_c=delta_hat.detach().numpy()
+  lrPr=10**(-6)
+  optimizer =  optim.Adam( net.parameters()   ,lr=lrPr)
+  optimizer.zero_grad()
+
+  Epochs=EpochsTune
+  batch_size=2
+  MultiBatchSize=10
+
+  for epoch in range(Epochs):
+    #### Random orderring:
+    perm=torch.randperm(ntr)
+    X_train_e=Xdata_tensor[perm].requires_grad_(False)  # .clone().detach()# torch.tensor(data_Train_X[perm]).float().requires_grad_(False)
+    Y_train_e=ydata_tensor[perm].requires_grad_(False)
+    Latdata=data_Train_Lat_tensor[perm].requires_grad_(False)
+    Londata=data_Train_Lon_tensor[perm].requires_grad_(False)
+
+    for b in range(ntr//batch_size):
+      Batch_id=np.array([b*batch_size,b*batch_size+1])
+      inputs=X_train_e[Batch_id,:]
+      labels=Y_train_e[Batch_id,:]
+
+      Batch_Dis= (np.sqrt( (Latdata[Batch_id[0]]-Latdata[Batch_id[1]])**2+((Londata[Batch_id[0]]-Londata[Batch_id[1]])*np.cos(np.pi*MeanLat/180))**2 ))*60
+      Batch_Rho=np.exp((-1)*delta_c*Batch_Dis)
+      Aterm=np.sqrt(2*tau2_c)*(np.sqrt(1+Batch_Rho)+np.sqrt(1-Batch_Rho))/2
+      Bterm=np.sqrt(2*tau2_c)*(np.sqrt(1+Batch_Rho)-np.sqrt(1-Batch_Rho))/2
+      outputs = net.forward(inputs)
+      yf = torch.sum(labels*outputs)
+      loss=torch.zeros((1,1))
+
+      for ks in range(nGQ2):
+          xks1=Aterm*WsXsArr[ks,1]+Bterm*WsXsArr[ks,2]
+          xks2=Bterm*WsXsArr[ks,1]+Aterm*WsXsArr[ks,2]
+          #sqrt2_sigb_xk = np.sqrt(2)  *x_ks[k]
+          y_sum_x = labels[0]*xks1 + labels[1]*xks2                                                                   # (torch.sum(labels) * sqrt2_sigb_xk)   #.to(device)
+          log_gamma_sum = torch.log(1 + torch.exp(outputs[0] + xks1)) +  torch.log(1 + torch.exp(outputs[1] + xks2))
+          loss = loss +( torch.exp(yf + y_sum_x - log_gamma_sum)* WsXsArr[ks,0]) / np.pi
+
+      loss = -torch.log(loss)
+      loss.backward()
+
+      if (b+1)%MultiBatchSize==0:
+        optimizer.step()
+        optimizer.zero_grad()
+
+  with torch.no_grad():
+    inputs=data_Test_X
+    labels=data_Test_Y
+    outputs = net.forward(inputs)
+    OutErr=nn.BCEWithLogitsLoss(reduction='mean')(outputs, labels).item()
+    OutErrZeroOne=1-(torch.sum((0.5*(torch.sign(outputs)+1))==(labels*1)).item())/nte
+
+  print('WholeData-Trainnig Completed, current time: ',datetime.now().strftime("%H:%M"))
+  print(f'OutErrZeroOne: {OutErrZeroOne:.3f},  OutErrLogLoss: {OutErr:.3f}')
+
+  ################# Preperations for Wcv estimators: #########################
+  Wcv=0
+  Wcv_ZeroOne=0
+  C_mat=np.zeros((Samp_size3,3,ntr))
+  LPtr=(net.forward(data_Train_X)).detach().numpy()
+  ########### Building Vtr, VtrInv and VtrRoot:
+  Vtr=np.zeros((ntr,ntr))
+  Vtr_Inv=np.zeros((ntr,ntr))
+  Vtr_Root=np.zeros((ntr,ntr))
+  startIndx=0
+  for j in range(nqtr):
+      nj=int(njVec[j])
+      EndIndx=startIndx+nj
+      Latdata=data_Train_Lat[startIndx:EndIndx]
+      Londata=data_Train_Lon[startIndx:EndIndx]
+      COVj=np.zeros((nj,nj))
+      for jj in range(nj):
+        Pivotindex=jj
+        PivotLat=Latdata[Pivotindex]
+        PivotLon=Londata[Pivotindex]
+        DisVec= (np.sqrt( (Latdata-PivotLat)**2+((Londata-PivotLon)*np.cos(np.pi*MeanLat/180))**2 ))*60
+        CovVec= (np.exp((-1)*delta_c*DisVec))*tau2_c
+        COVj[jj,:]=CovVec
+        COVj[jj,jj]=COVj[jj,jj]+0.05*tau2_c
+
+      Vtr[startIndx:EndIndx,startIndx:EndIndx]=COVj
+      Vtr_Inv[startIndx:EndIndx,startIndx:EndIndx]= np.linalg.inv(COVj)  #np.linalg.pinv(COVj)
+      Dj, Vj = scipy.linalg.eigh(COVj)
+      Vtr_Root[startIndx:EndIndx,startIndx:EndIndx]= (Vj * np.sqrt(Dj)) @ Vj.T
+      startIndx+=nj
+
+
+  ################ CV and Err2 estimation for the Given random sample:
+  print('CV and Err2 estimation started at: ',datetime.now().strftime("%H:%M"))
+  CV_i1=0
+  Err2_i1=0
+  LP_te=np.zeros(nte)
+  Yte=np.zeros(nte)
+  AUC_i1=0
+  AUC_hat_i1=0
+  AUC_corr_i1=0
+  AUC_corr2_i1=0
+
+  CV_ZeroOne_i1=0
+  Err_ZeroOne_i1=0
+
+  LPtr_cv=np.zeros((ntr,1))
+  Fsize=int(np.round(ntr/Kf))
+  for Fnum in range(Kf):
+    startindx=Fnum*Fsize
+    if Fnum<Kf-1:
+      endindx=startindx+Fsize
+    if Fnum==Kf-1:
+      endindx=ntr
+
+    va_id=np.arange(startindx,endindx)
+    X_test_k=Xdata_tensor[va_id,:]
+    Y_test_k=ydata_tensor[va_id,:]
+
+
+    tr_id=np.setdiff1d(np.arange(ntr),va_id)
+    X_train_k=Xdata_tensor[tr_id,:]
+    Y_train_k=ydata_tensor[tr_id,:]
+    data_Train_Lat_k=data_Train_Lat_tensor[tr_id]
+    data_Train_Lon_k=data_Train_Lon_tensor[tr_id]
+
+    lrPr=10**(-4)
+    net_k = Net()
+    optimizer =  optim.Adam( net_k.parameters()   ,lr=lrPr)
+    optimizer.zero_grad()
+
+    Epochs=EpochsNet
+    batch_size=100
+    ntr_k=len(tr_id)
+    nte_k=len(va_id)
+    ######### Trainnig on the Fold
+    print(f'Fold  {Fnum+1} Trainnig started at: ',datetime.now().strftime("%H:%M"))
+    for epoch in range(Epochs):
+      perm=torch.randperm(ntr_k)
+      X_train_k_e=X_train_k[perm].requires_grad_(False)  # .clone().detach()# torch.tensor(data_Train_X[perm]).float().requires_grad_(False)
+      Y_train_k_e=Y_train_k[perm].requires_grad_(False)
+      for b in range(ntr_k//batch_size):
+        inputs=X_train_k_e[b*batch_size:(b+1)*batch_size,:]
+        labels=Y_train_k_e[b*batch_size:(b+1)*batch_size,:]
+
+        optimizer.zero_grad()
+        outputs = net_k.forward(inputs)
+        loss=nn.BCEWithLogitsLoss(reduction='mean')(outputs, labels)
+
+        loss.backward()
+        optimizer.step()
+
+      inputs=X_train_k_e[(b+1)*batch_size::,:]
+      labels=Y_train_k_e[(b+1)*batch_size::,:]
+      optimizer.zero_grad()
+      outputs = net_k.forward(inputs)
+      loss=nn.BCEWithLogitsLoss(reduction='mean')(outputs, labels)
+      loss.backward()
+      optimizer.step()
+
+
+    ################# Optimzing RE parameters on the Fold: ###########
+    lrGlob=10**(-6)
+    tau= tau0
+    delta=delta0
+    tau2_hat=torch.tensor(tau).float().requires_grad_(True)
+    delta_hat=torch.tensor(delta).float().requires_grad_(True)
+    optimizer =  optim.Adam( [ {'params': tau2_hat }, {'params': delta_hat }  ]   ,lr=lrGlob)
+    Epochs=EpochsTune
+    MultiBatchSize=10
+    batch_size=2
+    optimizer.zero_grad()
+    with torch.no_grad():
+      outputs_Fixed=net_k.forward(X_train_k)
+
+    for epoch in range(Epochs):
+      ####### Random orderring:
+      perm=torch.randperm(ntr_k)
+      Ydata_RE_train=Y_train_k[perm].detach().numpy()
+      outputs_RE_train=outputs_Fixed[perm].detach().numpy()
+      Latdata=data_Train_Lat_k[perm].detach().numpy()
+      Londata=data_Train_Lon_k[perm].detach().numpy()
+
+      for b in range(ntr_k//batch_size):
+        Batch_id=np.array([b*batch_size,b*batch_size+1])
+
+        labels=Ydata_RE_train[Batch_id,:]
+        Batch_Dis= (np.sqrt( (Latdata[Batch_id[0]]-Latdata[Batch_id[1]])**2+((Londata[Batch_id[0]]-Londata[Batch_id[1]])*np.cos(np.pi*MeanLat/180))**2 ))*60
+        Batch_Rho=torch.exp((-1)*delta_hat*Batch_Dis)
+        Aterm=torch.sqrt(2*tau2_hat)*(torch.sqrt(1+Batch_Rho)+torch.sqrt(1-Batch_Rho))/2
+        Bterm=torch.sqrt(2*tau2_hat)*(torch.sqrt(1+Batch_Rho)-torch.sqrt(1-Batch_Rho))/2
+        outputs = outputs_RE_train[Batch_id,:]
+        yf = np.sum(labels*outputs)
+        loss=torch.zeros((1,1))
+        for ks in range(nGQ2):
+            xks1=Aterm*WsXsArr[ks,1]+Bterm*WsXsArr[ks,2]
+            xks2=Bterm*WsXsArr[ks,1]+Aterm*WsXsArr[ks,2]
+            #sqrt2_sigb_xk = np.sqrt(2)  *x_ks[k]
+            y_sum_x = labels[0,0]*xks1 + labels[1,0]*xks2                                                                   # (torch.sum(labels) * sqrt2_sigb_xk)   #.to(device)
+            log_gamma_sum = torch.log(1 + torch.exp(outputs[0,0] + xks1)) +  torch.log(1 + torch.exp(outputs[1,0] + xks2))
+            loss = loss +( torch.exp(yf + y_sum_x - log_gamma_sum) * WsXsArr[ks,0]) / np.pi
+
+        loss = -torch.log(loss)
+        loss.backward()
+
+        if (b+1)%MultiBatchSize==0:
+          optimizer.step()
+          optimizer.zero_grad()
+
+    ############### Fine-tunnig the model with the model with the RE params on the Fold:
+    tau2_c=tau2_hat.detach().numpy()
+    delta_c=delta_hat.detach().numpy()
+    lrPr=10**(-6)
+    optimizer =  optim.Adam( net_k.parameters()   ,lr=lrPr)
+    optimizer.zero_grad()
+
+    Epochs=EpochsTune
+    batch_size=2
+    MultiBatchSize=10
+
+    for epoch in range(Epochs):
+      ###### Random orderring:
+      perm=torch.randperm(ntr_k)
+      X_train_k_e=X_train_k[perm].requires_grad_(False)
+      Y_train_k_e=Y_train_k[perm].requires_grad_(False)
+      Latdata=data_Train_Lat_k[perm].requires_grad_(False)
+      Londata=data_Train_Lon_k[perm].requires_grad_(False)
+
+      for b in range(ntr_k//batch_size):
+        Batch_id=np.array([b*batch_size,b*batch_size+1])
+        inputs=X_train_k_e[Batch_id,:]
+        labels=Y_train_k_e[Batch_id,:]
+
+        Batch_Dis= (np.sqrt( (Latdata[Batch_id[0]]-Latdata[Batch_id[1]])**2+((Londata[Batch_id[0]]-Londata[Batch_id[1]])*np.cos(np.pi*MeanLat/180))**2 ))*60
+        Batch_Rho=np.exp((-1)*delta_c*Batch_Dis)
+        Aterm=np.sqrt(2*tau2_c)*(np.sqrt(1+Batch_Rho)+np.sqrt(1-Batch_Rho))/2
+        Bterm=np.sqrt(2*tau2_c)*(np.sqrt(1+Batch_Rho)-np.sqrt(1-Batch_Rho))/2
+        outputs = net_k.forward(inputs)
+        yf = torch.sum(labels*outputs)
+        loss=torch.zeros((1,1))
+
+        for ks in range(nGQ2):
+            xks1=Aterm*WsXsArr[ks,1]+Bterm*WsXsArr[ks,2]
+            xks2=Bterm*WsXsArr[ks,1]+Aterm*WsXsArr[ks,2]
+            y_sum_x = labels[0]*xks1 + labels[1]*xks2
+            log_gamma_sum = torch.log(1 + torch.exp(outputs[0] + xks1)) +  torch.log(1 + torch.exp(outputs[1] + xks2))
+            loss = loss +( torch.exp(yf + y_sum_x - log_gamma_sum)* WsXsArr[ks,0]) / np.pi
+
+        loss = -torch.log(loss)
+        loss.backward()
+
+        if (b+1)%MultiBatchSize==0:
+          optimizer.step()
+          optimizer.zero_grad()
+
+    ########### Evaluating CV and Err of the Fold:
+    with torch.no_grad():
+      inputs=X_test_k
+      labels=Y_test_k
+      outputs = net_k.forward(inputs)
+      LPtr_cv[va_id,:]=outputs.detach().numpy()
+      CV_i1+=nn.BCEWithLogitsLoss(reduction='sum')(outputs, labels).item()
+      CV_ZeroOne_i1+=(torch.sum((0.5*(torch.sign(outputs)+1))==(labels*1)).item())
+      inputs=data_Test_X
+      labels=data_Test_Y
+      outputs = net_k.forward(inputs)
+      Err2_i1+=nn.BCEWithLogitsLoss(reduction='mean')(outputs, labels).item()
+      Err_ZeroOne_i1+=1-((torch.sum((0.5*(torch.sign(outputs)+1))==(labels*1)).item())/nte)
+
+
+  ################# Calculating Wcv estimators  ################
+  print('Wcv estimation started at: ',datetime.now().strftime("%H:%M"))
+  for Fnum in range(Kf):
+    startindx=Fnum*Fsize
+    if Fnum<Kf-1:
+      endindx=startindx+Fsize
+    if Fnum==Kf-1:
+      endindx=ntr
+
+    va_id=np.arange(startindx,endindx)
+    X_test_k=Xdata_tensor[va_id,:]
+    Y_test_k=ydata_tensor[va_id,:]
+
+
+    tr_id=np.setdiff1d(np.arange(ntr),va_id)
+    X_train_k=Xdata_tensor[tr_id,:]
+    #Y_train_k=
+
+    ntr_k=len(tr_id)
+    nte_k=len(va_id)
+    ######### Bootstraping on the Fold
+    print(f'Fold {Fnum+1} Bootstraping started at: ',datetime.now().strftime("%H:%M"))
+
+    for i3 in range(Samp_size3):
+      Stilde=np.reshape(rng.standard_normal(ntr), (ntr,1) )
+      REVec=(Vtr_Root@Stilde)[Mainperm]
+      Mubtr=g(LPtr_cv+REVec)             ## LPtr
+
+      Ytr_b= (np.random.uniform(size=ntr) <  np.reshape(Mubtr, ntr)   ).astype(np.float64)
+      #print('Ytr_b_mean: ',Ytr_b.mean())
+      ydata_tensor_b=torch.tensor(Ytr_b).float().requires_grad_(False)
+      ydata_tensor_b= ydata_tensor_b.view(ntr,1)
+      Y_train_k=ydata_tensor_b[tr_id,:]
+
+      C_mat[i3,0,va_id]=np.reshape(Mubtr, ntr)[va_id]
+
+      ## Init:
+      lrPr=10**(-4)
+      netb = Net()
+      #netb=copy.deepcopy(net)
+      optimizer =  optim.Adam( netb.parameters()   ,lr=lrPr)
+      optimizer.zero_grad()
+      Epochs=EpochsB
+      batch_size=100
+
+      ######### Trainig:
+      for epoch in range(Epochs):
+        perm=torch.randperm(ntr_k)
+        X_train_k_e=X_train_k[perm].requires_grad_(False)  # .clone().detach()# torch.tensor(data_Train_X[perm]).float().requires_grad_(False)
+        Y_train_k_e=Y_train_k[perm].requires_grad_(False)
+
+        for b in range(ntr_k//batch_size):
+          inputs=X_train_k_e[b*batch_size:(b+1)*batch_size,:]
+          labels=Y_train_k_e[b*batch_size:(b+1)*batch_size,:]
+
+          optimizer.zero_grad()
+          outputs = netb.forward(inputs)
+          loss=nn.BCEWithLogitsLoss(reduction='mean')(outputs, labels)
+
+          loss.backward()
+          optimizer.step()
+
+        inputs=X_train_k_e[(b+1)*batch_size::,:]
+        labels=Y_train_k_e[(b+1)*batch_size::,:]
+        optimizer.zero_grad()
+        outputs = netb.forward(inputs)
+        loss=nn.BCEWithLogitsLoss(reduction='mean')(outputs, labels)
+        loss.backward()
+        optimizer.step()
+
+      with torch.no_grad():
+        inputs=X_test_k
+        labels=Y_test_k
+        outputs_b = (netb.forward(inputs)).detach().numpy()
+        C_mat[i3,1,va_id]=np.reshape(outputs_b, nte_k)
+        C_mat[i3,2,va_id]=np.reshape(2*(outputs_b>=0), nte_k)
+
+
+  for f in range(ntr):
+    COV_mat=np.cov(C_mat[:,:,f],rowvar=False)
+    Wcv+=COV_mat[0,1]
+    Wcv_ZeroOne+=COV_mat[0,2]
+
+  Wcv=Wcv/ntr
+  Wcv_ZeroOne=Wcv_ZeroOne/ntr
+  Wcv_Results[i1]=Wcv
+  Wcv_ZeroOne_Results[i1]=Wcv_ZeroOne
+  print(f'Wcv_LogLoss: {Wcv:.3f}')
+  print(f'Wcv_ZeroOne: {Wcv_ZeroOne:.3f}')
+
+
+
+  Err2_i1/=Kf
+  Err_ZeroOne_i1/=Kf
+
+  CV_ZeroOne_i1= 1 - CV_ZeroOne_i1/ntr
+  CV_i1/=ntr
+
+
+  print(f'Outloss2: {Err2_i1:.3f}')
+  print(f'CV: {CV_i1:.3f}')
+
+  print(f'Outloss_ZeroOne: {Err_ZeroOne_i1:.3f}')
+  print(f'CV_ZeroOne: {CV_ZeroOne_i1:.3f}')
+
+  CV_Results[i1]=CV_i1
+  Err2_Results[i1]=Err2_i1
+
+  CV_ZeroOne_Results[i1]=CV_ZeroOne_i1
+  Err_ZeroOne_Results[i1]=Err_ZeroOne_i1
+
+
+  print(f'Sample completed: {i1}, current time: ',datetime.now().strftime("%H:%M"))
+  #### Data saving during the Run:
+  CV_Results_t=np.reshape(CV_Results,(Samp_size1,1))
+  Err2_Results_t=np.reshape(Err2_Results,(Samp_size1,1))
+  Wcv_Results_t=np.reshape(Wcv_Results,(Samp_size1,1))
+
+  CV_ZeroOne_Results_t=np.reshape(CV_ZeroOne_Results,(Samp_size1,1))
+  Err_ZeroOne_Results_t=np.reshape(Err_ZeroOne_Results,(Samp_size1,1))
+  Wcv_ZeroOne_Results_t=np.reshape(Wcv_ZeroOne_Results,(Samp_size1,1))
+
+
+  ResData=np.hstack((Err2_Results_t,CV_Results_t,Wcv_Results_t,Err_ZeroOne_Results_t,CV_ZeroOne_Results_t,Wcv_ZeroOne_Results_t))
+  np.savetxt('/content/drive/MyDrive/Results/AirBNB_CVc/AirBNB_CVc_Batch1.csv', data , delimiter=",")
+
+
+print('Simulation Completed, current time: ',datetime.now().strftime("%H:%M"))
 
