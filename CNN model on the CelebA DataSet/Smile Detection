@@ -760,7 +760,7 @@ for i1 in range(Samp_size1):
 
   data=np.hstack((Err2_Results_t,CV_Results_t,Wcv_Apprx_Results_t,Err_ZeroOne_Results_t,CV_ZeroOne_Results_t,Wcv_ZeroOne_Apprx_Results_t,AUC_hat_Results_t,AUC_corr_Approx_Results_t,AUC_Results_t))
 
-  np.savetxt('/content/drive/MyDrive/Results/CelebA/Smile_Logistic_CVc_ZereOneLoss/CelebA_Smile_Logistic_CVc_ZereOneLoss__Temp_Batch1.csv', data , delimiter=",")
+  np.savetxt('/content/drive/MyDrive/Results/CelebA_Smile_CVc/CelebA_Smile_Logistic_CVc_ZereOneLoss__Temp_Batch1.csv', data , delimiter=",")
 
 print('Simulation Completed, current time: ',datetime.now().strftime("%H:%M"))
 
