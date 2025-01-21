@@ -344,5 +344,428 @@ def G(z):
     return np.log(1+np.exp(z)) ## Zigmoid Prime
 
 
+############ Full Simulation : #########################
+CV_Results=np.zeros(Samp_size1)
+CV_ZeroOne_Results=np.zeros(Samp_size1)
+Err_ZeroOne_Results=np.zeros(Samp_size1)
+
+Err_Results=np.zeros(Samp_size1)
+Err2_Results=np.zeros(Samp_size1)
+Wcv_Apprx_Results=np.zeros(Samp_size1)
+Wcv_ZeroOne_Apprx_Results=np.zeros(Samp_size1)
+
+AUC_hat_Results=np.zeros(Samp_size1)
+AUC_Results=np.zeros(Samp_size1)
+AUC_corr_Approx_Results=np.zeros(Samp_size1)
+
+Thresholds_Vec=np.arange(0.95,0.03,-0.02)
+Lt=len(Thresholds_Vec)
+
+
+lrGlob=0.0001
+lrPr=0.00001
+
+nGQ = 8
+x_ks, w_ks = np.polynomial.hermite.hermgauss(nGQ)
+
+for i1 in range(Samp_size1):
+  ################ Defining random sample out of the whole data set
+  Identities_Table_tot=celeba_dataset.MasterTable[rng.choice(range(Nq),size=nqtot, replace=False),:]
+  randOrder=np.random.permutation(nqtot)-1
+  Identities_Table_tot = Identities_Table_tot[randOrder,:]
+  Identities_Table_tr = Identities_Table_tot[0:nqtr,:]
+  Identities_Table_te = Identities_Table_tot[nqtr::,:]
+  ######## Flattening the trainng data for Folds splitting:
+  ntr=np.sum(Identities_Table_tr[:,39])
+  nte=np.sum(Identities_Table_te[:,39])
+  print('Training size: ',ntr)
+  print('Test size: ',nte)
+  F_Table=np.zeros((ntr,2)).astype(int)
+  c=0
+  for j in range(nqtr):
+    nj=Identities_Table_tr[j,39]
+    F_Table[c:c+nj,0]=np.zeros(nj)+Identities_Table_tr[j,0]
+    F_Table[c:c+nj,1]=Identities_Table_tr[j,1:nj+1]
+    c+=nj
+
+  randOrder=np.random.permutation(ntr)-1
+  F_Table=F_Table[randOrder,:]
+  Fsize=int(np.round(ntr/Kf))
+
+  ######## Training Once on the WholeData:
+  #### Init: ############################
+  net = Net()
+  net.to(device)
+  tau= tau0
+  #sig=10
+  tau2=torch.tensor(tau).float().requires_grad_(True)
+  optimizer =  optim.Adam( [ {'params':net.parameters()} , {'params': tau2 , 'lr': lrGlob}  ]   ,lr=lrPr)
+  ######### Trainig:
+  print('WholeData-Trainnig started at: ',datetime.now().strftime("%H:%M"))
+  net.train()
+
+  for epoch in range(Epochs):  # loop over the dataset multiple times
+    for j in range(nqtr):
+      nj=Identities_Table_tr[j,39]
+      if nj>0:
+        idxs=Identities_Table_tr[j,1:nj+1]
+        inputs, labels = celeba_dataset.__getItemsByIndices__(idxs)
+        inputs=inputs.to(device)
+        labels=labels.view(nj,1).float().to(device)
+        outputs = net.forward(inputs)
+
+        optimizer.zero_grad()
+        yf = labels.T@outputs
+        loss=torch.zeros((1,1)).to(device)
+
+        for k in range(nGQ):
+          sqrt2_sigb_xk = np.sqrt(2)*torch.sqrt(tau2)*x_ks[k]
+          y_sum_x = (torch.sum(labels) * sqrt2_sigb_xk).to(device)
+          log_gamma_sum = torch.sum(torch.log(1 + torch.exp(outputs + sqrt2_sigb_xk)))
+          loss = loss + torch.exp(yf + y_sum_x - log_gamma_sum) * w_ks[k] / np.sqrt(np.pi)
+
+        loss = -torch.log(loss)
+        loss.backward()
+        optimizer.step()
+    if epoch % k2 == k2-1:
+      with torch.no_grad():
+        net.eval()
+        OutErr=0
+        for j in range(nqte):
+          nj=Identities_Table_te[j,39]
+          idxs=Identities_Table_te[j,1:nj+1]
+          inputs, labels = celeba_dataset.__getItemsByIndices__(idxs)
+          inputs=inputs.to(device)
+          labels=labels.view(nj,1).float().to(device)
+
+          outputs = net.forward(inputs)
+          OutErr+=nn.BCEWithLogitsLoss(reduction='sum')(outputs, labels).item()
+
+        OutErr/=nte
+
+        InErr=0
+        p1=0
+        for j in range(nqtr):
+          nj=Identities_Table_tr[j,39]
+          idxs=Identities_Table_tr[j,1:nj+1]
+          inputs, labels = celeba_dataset.__getItemsByIndices__(idxs)
+          p1+=labels.sum()
+
+          inputs=inputs.to(device)
+          labels=labels.view(nj,1).float().to(device)
+
+          outputs = net.forward(inputs)
+          InErr+=nn.BCEWithLogitsLoss(reduction='sum')(outputs, labels).item()
+
+        InErr/=ntr
+
+        print(f'Ephoc {epoch + 1} Completed, Outloss: {OutErr:.3f},  Inloss: {InErr:.3f}')
+        net.train()
+
+      Err_i1=OutErr
+      Err_Results[i1]=Err_i1
+      print('tau2_hat:',tau2)
+  print('WholeData-Trainnig Completed, current time: ',datetime.now().strftime("%H:%M"))
+  p1/=ntr
+  p0=1-p1
+
+
+
+  ################# Working on the last layer To Calc Wcv and Wcv_Apprx:
+  print('Wcv_Apprx estimation started at: ',datetime.now().strftime("%H:%M"))
+  Sig_s_hat=np.sqrt(tau2.cpu().detach().numpy())
+  coefs=np.zeros((H+1,1))
+  layer = net.fc2
+  coefs[0,0]=layer.bias.cpu().detach().numpy()
+  coefs[1::,0]=layer.weight.cpu().detach().numpy()
+  Wcv_Apprx=0
+  Wcv_ZeroOne_Apprx=0
+  Wcv_Approx_Vec=np.zeros(Lt)
+
+
+  for Fnum in range(Kf):
+    Identities_Table_tr_1, Identities_Table_cv_1, F_Table_cv =FromFTableTo_Splited_IdentitiesTable_k(Fnum)
+    ntr1=np.sum(Identities_Table_tr_1[:,39])
+    ncv1=np.sum(Identities_Table_cv_1[:,39])
+
+    ########### Building Vtrinv and Xtr, Xte, Ztr, Zte:
+    Vtr_inv=np.zeros((ntr1,ntr1))
+    Xtr=np.zeros((ntr1,H))
+    Ztr=np.zeros((ntr1,nqtr))
+    Xcv=np.zeros((ncv1,H))
+    Zcv=np.zeros((ncv1,nqtr))
+
+    with torch.no_grad():
+      net.eval()
+      startIndx=0
+      for j in range(nqtr):
+          nj=Identities_Table_tr_1[j,39]
+          if nj>0:
+            EndIndx=startIndx+nj
+            idxs=Identities_Table_tr_1[j,1:nj+1]
+            inputs = celeba_dataset.__getItemsByIndices__(idxs)[0]
+            inputs=inputs.to(device)
+            Xtr[startIndx:EndIndx,:]=( net.Semi_forward(inputs) ).cpu().detach().numpy()
+            Ztr[startIndx:EndIndx,j]=np.ones(nj)
+            startIndx+=nj
+
+      startIndx=0
+      for j in range(nqtr):
+          nj=Identities_Table_cv_1[j,39]
+          if nj>0:
+            EndIndx=startIndx+nj
+            idxs=Identities_Table_cv_1[j,1:nj+1]
+            inputs = celeba_dataset.__getItemsByIndices__(idxs)[0]
+            inputs=inputs.to(device)
+            Xcv[startIndx:EndIndx,:]=( net.Semi_forward(inputs) ).cpu().detach().numpy()
+            Zcv[startIndx:EndIndx,j]=np.ones(nj)
+            startIndx+=nj
+
+
+    PHItr=np.column_stack((np.ones(ntr1), Xtr))
+    LPtr =PHItr@coefs
+    PHIte=np.column_stack((np.ones(ncv1), Xcv))
+    LPte =PHIte@coefs
+
+
+    MusMat=np.zeros((ntr1,Samp_size4))
+    Dvec=np.zeros(ntr1)
+    for i4 in range(Samp_size4):
+      Stilde=np.reshape(rng.standard_normal(nqtr)*Sig_s_hat, (nqtr,1) )
+      MUbtr=np.reshape(LPtr+Ztr@Stilde,ntr1 )
+      MusMat[:,i4] = g(MUbtr)
+      Dvec+=g_tag(MUbtr)
+
+    Dvec/=Samp_size4
+    Dtr=np.diag(Dvec)
+
+    MusVec=np.mean(MusMat,axis=1)
+
+    Vtr_inv=np.zeros((ntr1,ntr1))
+    Vtr=np.zeros((ntr1,ntr1))
+    startIndx=0
+    for j in range(nqtr):
+        nj=Identities_Table_tr_1[j,39]
+        if nj>1:
+          EndIndx=startIndx+nj
+          COVj=np.cov(MusMat[startIndx:EndIndx,:])
+          Vtr[startIndx:EndIndx,startIndx:EndIndx]=COVj+Dtr[startIndx:EndIndx,startIndx:EndIndx]
+          Vtr_inv[startIndx:EndIndx,startIndx:EndIndx]= np.linalg.inv(COVj+Dtr[startIndx:EndIndx,startIndx:EndIndx])
+          startIndx+=nj
+        if nj==1:
+          Vtr_inv[startIndx,startIndx]=1/( np.var(MusMat[startIndx,:])+Dtr[startIndx,startIndx] )
+          startIndx+=1
+
+
+    Hmat=PHIte@np.linalg.inv(PHItr.T@Dtr@Vtr_inv@Dtr@PHItr)@PHItr.T@Dtr@Vtr_inv
+    C_mat_Approx=np.zeros((Samp_size2,3,ncv1))
+    V_mat_Tresholds_Approx=np.zeros((Samp_size2,Lt+1,ncv1))
+
+
+    for i2 in range(Samp_size2):
+      Stilde=np.reshape(rng.standard_normal(nqtr)*Sig_s_hat, (nqtr,1) )
+      MUbte=g(LPte+Zcv@Stilde)
+      C_mat_Approx[i2,0,:]=np.reshape(MUbte, ncv1)
+
+
+      MUbtr=g(LPtr+Ztr@Stilde)
+      C_mat_Approx[i2,1,:]=np.reshape(Hmat@MUbtr, ncv1)
+
+
+      Ytr_b= (np.random.uniform(size=ntr1) <  np.reshape(MUbtr, ntr1)   ).astype(np.float64)
+      LPte_kb_Approx=LPte+Hmat@(np.reshape(Ytr_b-MusVec,(ntr1,1)))
+      C_mat_Approx[i2,2,:]= np.reshape(2*(LPte_kb_Approx>=0), ncv1)
+
+      V_mat_Tresholds_Approx[i2,Lt,:]=np.reshape(MUbte, ncv1)
+      for j3 in range(Lt):
+        V_mat_Tresholds_Approx[i2,j3,:]=(g( np.reshape(LPte_kb_Approx, ncv1)   )>=Thresholds_Vec[j3])
+
+    for f in range(ncv1):
+      COV_mat=np.cov(C_mat_Approx[:,:,f],rowvar=False)
+      Wcv_Apprx+=COV_mat[0,1]
+      Wcv_ZeroOne_Apprx+=COV_mat[0,2]
+
+      COV_mat=np.cov(V_mat_Tresholds_Approx[:,:,f],rowvar=False,ddof=0)
+      Wcv_Approx_Vec+=COV_mat[Lt,0:Lt]
+
+
+  Wcv_Apprx=Wcv_Apprx/ntr
+  Wcv_ZeroOne_Apprx=Wcv_ZeroOne_Apprx/ntr
+
+  Wcv_Apprx_Results[i1]=Wcv_Apprx
+  Wcv_ZeroOne_Apprx_Results[i1]=Wcv_ZeroOne_Apprx
+
+  Wcv_Approx_Vec/=ntr
+
+  print('Wcv and Wcv_Apprx estimation Completed at: ',datetime.now().strftime("%H:%M"))
+
+
+  ################ CV and Err2 estimation for the Given random sample:
+  print('CV and Err2 estimation started at: ',datetime.now().strftime("%H:%M"))
+  CV_i1=0
+  Err2_i1=0
+  LP_te=np.zeros(nte)
+  Yte=np.zeros(nte)
+  AUC_i1=0
+  AUC_hat_i1=0
+  AUC_corr_i1=0
+
+  CV_ZeroOne_i1=0
+  Err_ZeroOne_i1=0
+
+
+
+  for Fnum in range(Kf):
+    Identities_Table_tr_1, Identities_Table_cv_1 , F_Table_cv =FromFTableTo_Splited_IdentitiesTable_k(Fnum)
+    ncv1=np.sum(Identities_Table_cv_1[:,39])
+    LP_te_indx=0
+    net = Net()
+    net.to(device)
+    tau=tau0 #1.5  #Sig_s_hat #1.3
+    tau2=torch.tensor(tau).float().requires_grad_(True)
+    optimizer =  optim.Adam( [ {'params':net.parameters()} , {'params': tau2 , 'lr': lrGlob}  ]   ,lr=lrPr)
+    net.train()
+    for epoch in range(Epochs):  # loop over the dataset multiple times
+      for j in range(nqtr):
+        nj=Identities_Table_tr_1[j,39]
+        if nj>0:
+          idxs=Identities_Table_tr_1[j,1:nj+1]
+          inputs, labels = celeba_dataset.__getItemsByIndices__(idxs)
+          inputs=inputs.to(device)
+          labels=labels.view(nj,1).float().to(device)
+          outputs = net.forward(inputs)
+          optimizer.zero_grad()
+          yf = labels.T@outputs
+          loss=torch.zeros((1,1)).to(device)
+
+          for k in range(nGQ):
+            sqrt2_sigb_xk = np.sqrt(2)*torch.sqrt(tau2)*x_ks[k]
+            y_sum_x = (torch.sum(labels) * sqrt2_sigb_xk).to(device)
+            log_gamma_sum = torch.sum(torch.log(1 + torch.exp(outputs + sqrt2_sigb_xk)))
+            loss = loss + torch.exp(yf + y_sum_x - log_gamma_sum) * w_ks[k] / np.sqrt(np.pi)
+
+          loss = -torch.log(loss)     # == NLL(outputs, labels)
+          loss.backward()
+          optimizer.step()
+
+
+    with torch.no_grad():
+      net.eval()
+      OutErr=0
+      for j in range(nqte):
+        nj=Identities_Table_te[j,39]
+        idxs=Identities_Table_te[j,1:nj+1]
+        inputs, labels = celeba_dataset.__getItemsByIndices__(idxs)
+        inputs=inputs.to(device)
+        labels=labels.view(nj,1).float().to(device)
+        outputs = net.forward(inputs)
+        OutErr+=nn.BCEWithLogitsLoss(reduction='sum')(outputs, labels,).item()
+        LP_te[LP_te_indx:LP_te_indx+nj]=np.reshape(outputs.cpu().detach().numpy(),nj)
+        Yte[LP_te_indx:LP_te_indx+nj]=np.reshape(labels.cpu().detach().numpy(),nj)
+        LP_te_indx+=nj
+
+
+      OutErr/=nte
+      Err_ZeroOne_i1+=np.mean(Yte!=(LP_te>=0))
+      fpr, tpr, thresholds = metrics.roc_curve(Yte,g(LP_te))
+      AUC_i1+=metrics.auc(fpr, tpr)
+
+
+
+
+      idxs=F_Table_cv[:,1]
+      inputs, labels = celeba_dataset.__getItemsByIndices__(idxs)
+      inputs=inputs.to(device)
+      labels=labels.view(len(idxs),1).float().to(device)
+      outputs = net.forward(inputs)
+      CV=nn.BCEWithLogitsLoss(reduction='mean')(outputs, labels).item()
+
+      LP_CV=np.reshape(outputs.cpu().detach().numpy(),ncv1)
+      Ycv=np.reshape(labels.cpu().detach().numpy(),ncv1)
+
+      CV_ZeroOne_i1+=np.sum(Ycv!=(LP_CV>=0))
+
+
+      print(f'Fold {Fnum + 1} Completed, CVest: {CV:.3f}')
+      print('Time: ',datetime.now().strftime("%H:%M"))
+
+
+      fpr, tpr, thresholds = metrics.roc_curve(Ycv,g(LP_CV))
+      AUC_hat_i1+=metrics.auc(fpr, tpr)
+
+      ################## Correcting the AUC metric:
+      ##### With Wcv Approx:
+      fpr_berve=np.copy(fpr)
+      tpr_berve=np.copy(tpr)
+
+      Tindx=0
+      for j3 in range(len(thresholds)):
+        if (thresholds[j3]<0.95) and (thresholds[j3]>0.05):
+          while (Thresholds_Vec[Tindx]>thresholds[j3]) and (Tindx<Lt-1) :
+            Tindx+=1
+
+          if Tindx>0:
+            wc=(Wcv_Approx_Vec[Tindx-1]+Wcv_Approx_Vec[Tindx])/2
+            fpr_berve[j3]= np.minimum (np.maximum( fpr_berve[j3]+(1/p0)*wc , fpr_berve[j3-1]),1)
+            tpr_berve[j3]= np.minimum (np.maximum( tpr_berve[j3]-(1/p1)*wc , tpr_berve[j3-1]),1)
+
+        if thresholds[j3]<=0.05:
+          fpr_berve[j3]= np.maximum( fpr_berve[j3] , fpr_berve[j3-1])
+          tpr_berve[j3]= np.maximum( tpr_berve[j3], tpr_berve[j3-1])
+
+
+      AUC_corr_i1+=metrics.auc(fpr_berve, tpr_berve)
+
+    Err2_i1+=OutErr
+    CV_i1+=CV
+
+
+
+  CV_Results[i1]=CV_i1/Kf
+  Err2_Results[i1]=Err2_i1/Kf
+  CV_ZeroOne_Results[i1]=CV_ZeroOne_i1/ntr
+  Err_ZeroOne_Results[i1]=Err_ZeroOne_i1/Kf
+
+  AUC_hat_Results[i1]=AUC_hat_i1/Kf
+  AUC_Results[i1]=AUC_i1/Kf
+  AUC_corr_Approx_Results[i1]=AUC_corr_i1/Kf
+
+
+  print(f'Outloss2: {Err2_Results[i1]:.3f}')
+  print(f'CV: {CV_Results[i1]:.3f}')
+  print(f'Wcv_Apprx: {Wcv_Apprx_Results[i1]:.3f}')
+
+  print(f'Outloss_ZeroOne: {Err_ZeroOne_Results[i1]:.3f}')
+  print(f'CV_ZeroOne: {CV_ZeroOne_Results[i1]:.3f}')
+  print(f'Wcv_ZeroOne_Apprx: {Wcv_ZeroOne_Apprx_Results[i1]:.3f}')
+
+  print(f'AUC_hat: {AUC_hat_Results[i1]:.3f}')
+  print(f'AUC: {AUC_Results[i1]:.3f}')
+  print(f'AUC_corr_Approx: {AUC_corr_Approx_Results[i1]:.3f}')
+
+  print(f'Sample {i1 + 1} Completed')
+
+  #### Data saving during the Run:
+  CV_Results_t=np.reshape(CV_Results,(Samp_size1,1))
+  Err2_Results_t=np.reshape(Err2_Results,(Samp_size1,1))
+  Wcv_Apprx_Results_t=np.reshape(Wcv_Apprx_Results,(Samp_size1,1))
+
+  CV_ZeroOne_Results_t=np.reshape(CV_ZeroOne_Results,(Samp_size1,1))
+  Err_ZeroOne_Results_t=np.reshape(Err_ZeroOne_Results,(Samp_size1,1))
+  Wcv_ZeroOne_Apprx_Results_t=np.reshape(Wcv_ZeroOne_Apprx_Results,(Samp_size1,1))
+
+  AUC_hat_Results_t=np.reshape(AUC_hat_Results,(Samp_size1,1))
+  AUC_corr_Approx_Results_t=np.reshape(AUC_corr_Approx_Results,(Samp_size1,1))
+  AUC_Results_t=np.reshape(AUC_Results,(Samp_size1,1))
+
+  data=np.hstack((Err2_Results_t,CV_Results_t,Wcv_Apprx_Results_t,Err_ZeroOne_Results_t,CV_ZeroOne_Results_t,Wcv_ZeroOne_Apprx_Results_t,AUC_hat_Results_t,AUC_corr_Approx_Results_t,AUC_Results_t))
+
+  np.savetxt('/content/drive/MyDrive/Results/CelebA/Smile_Logistic_CVc_ZereOneLoss/CelebA_Smile_Logistic_CVc_ZereOneLoss__Temp_Batch1.csv', data , delimiter=",")
+
+print('Simulation Completed, current time: ',datetime.now().strftime("%H:%M"))
+
+
+
+
 
 
