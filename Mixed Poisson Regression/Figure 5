@@ -334,7 +334,33 @@ for i1 in range(Samp_size1):
   
 
 
+data=np.stack((CV_Semi_Results,Wcv_Semi_Results,Wcv_Apprx_Semi1_Results,Wcv_Apprx_Semi2_Results,Err_Semi_Results,Err2_Semi_Results   ))
 
 
+CV_Results=   data[0,:] # np.hstack((data[0,:],data4[0,:]))   # data[0,:]
+Wcv_Results= data[1,:] # np.hstack((data[1,:],data4[1,:]))   #data[1,:]
+Wcv_Apprx2_Results=data[3,:]
+Err2_Results=data[5,:]
+TestErr_mean= np.mean(Err2_Results)
+Wcv_Apprx_Results=Wcv_Apprx1_Results-Wcv_Apprx2_Results
+plt.figure(figsize=(10,6))
+sns.kdeplot(CV_Results, color='blue')
+sns.kdeplot(CV_Results+Wcv_Results, color='red')
+sns.kdeplot(CV_Results+Wcv_Apprx_Results, color='green')
+sns.kdeplot(Err2_Results, color='black',linestyle='dotted')
+
+plt.legend(labels=['CV', r'$\widehat{CV}_c$',r'$\widetilde{CV}_c$',r'$Gen-Error$'])
+plt.title('Error Estimates for Poisson regression - partially new random effects', fontsize=12 )
+
+plt.axvline(x=np.mean(CV_Results),linewidth=2, color='blue')
+plt.axvline(x=np.mean(CV_Results+Wcv_Results),linewidth=2, color='red')
+plt.axvline(x=np.mean(CV_Results+Wcv_Apprx_Results),linewidth=2, color='green')
+
+plt.axvline(x=TestErr_mean,linewidth=2, color='black',linestyle='dotted')
+cent=TestErr_mean
+width=0.8
+plt.xticks([])
+plt.xlim(cent-width,cent+width)
+plt.xlabel('Error estimation', fontsize=10)
 
 
