@@ -1,1 +1,574 @@
+import numpy as np
+from numpy.random import default_rng
+from scipy.stats import norm
+from scipy.stats import binom
+from scipy.stats import poisson
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.neighbors import KernelDensity
+from datetime import datetime
+from sklearn import metrics
+rng = default_rng()
 
+pip install gpboost -U
+
+import gpboost as gpb
+import math
+from scipy import stats
+
+
+# **Two Levels Hirarcial model:**
+
+########### Setting:
+p=10 
+q1= 10 
+q2=5
+
+
+beta=0.5
+Sig_s1= 1
+Sig_s2= 0.5
+
+ntr=110
+K=11
+Fsize=10
+nte=Fsize
+n=ntr-nte
+
+############ Definition for the Link Function
+a=1
+
+
+def g(z):
+    #return z*(z>0)+(z<0)*a*(np.exp(z/a)-1) ELU
+    return 1/(1+np.exp(-z)) ## Zigmoid
+    #return np.exp(z) ## Poisson
+
+
+def g_inv(z):
+    return np.log(z/(1-z)) ##Zigmoid_inv
+
+def g_tag(z):
+    return np.exp(-z)/(1+np.exp(-z))**2 ## Zigmoid-tag
+
+def g_tag2(z):
+    return (np.exp(-2*z)-np.exp(-z))/(1+np.exp(-z))**3 ## Zigmoid-tag
+
+def g_tag3(z):
+    return (np.exp(-3*z)-4*np.exp(-2*z)+np.exp(-z))/(1+np.exp(-z))**4 ## Zigmoid-tag
+
+def G(z):
+    return np.log(1+np.exp(z)) ## Zigmoid Prime
+
+
+likelihood = "bernoulli_logit"
+
+def simulate_response_variable(lp, rand_eff, likelihood):
+    """Function that simulates response variable for various likelihoods"""
+    n = len(rand_eff)
+    if likelihood == "gaussian":
+        xi = 0.1**0.5 * np.random.normal(size=n) # error term, variance = 0.1
+        y = lp + rand_eff + xi
+    elif likelihood == "bernoulli_probit":
+        probs = stats.norm.cdf(lp + rand_eff)
+        y = np.random.uniform(size=n) < probs
+        y = y.astype(np.float64)
+    elif likelihood == "bernoulli_logit":
+        probs = 1 / (1 + np.exp(-(lp + rand_eff)))
+        y = np.random.uniform(size=n) < probs
+        y = y.astype(np.float64)
+    elif likelihood == "poisson":
+        mu = np.exp(lp + rand_eff)
+        y = stats.poisson.ppf(np.random.uniform(size=n), mu=mu)
+    elif likelihood == "gamma":
+        mu = np.exp(lp + rand_eff)
+        y = mu * stats.gamma.ppf(np.random.uniform(size=n), a=1)
+    return y
+
+
+
+# **The case of full random effect**
+
+################## Full Simulation with single loop for Full-CV: ##############
+Samp_size1= 1000
+Samp_size2=  200
+Samp_size3=10**3
+print('Simulation started at: ',datetime.now().strftime("%H:%M"))
+FittingIters=800
+
+KnownParams=False
+
+
+model_vals=np.array([p+1,8,7,6,4,3])                      
+model_lev=len(model_vals)
+
+Thresholds_Vec=np.arange(0.95,0.03,-0.02)
+
+Lt=len(Thresholds_Vec)
+#Wcv_Vec_Results=np.zeros((Samp_size1,Lt))
+#Wcv_Approx_Vec_Results=np.zeros((Samp_size1,Lt))
+
+
+CV_Results=np.zeros((model_lev,Samp_size1))
+ACCU_hat_Results=np.zeros((model_lev,Samp_size1))
+
+Wcv_Apprx_Results=np.zeros((model_lev,Samp_size1))
+Wcv_Results=np.zeros((model_lev,Samp_size1))
+Wcv_ACCU_Apprx_Results=np.zeros((model_lev,Samp_size1))
+Wcv_ACCU_Results=np.zeros((model_lev,Samp_size1))
+
+
+CV_tilde_diffs=np.zeros((model_lev,Samp_size1))
+AUC_corr2_Results=np.zeros((model_lev,Samp_size1))
+AUC_corr3_Results=np.zeros((model_lev,Samp_size1))
+
+Err_Results=np.zeros((model_lev,Samp_size1))
+Err2_Results=np.zeros((model_lev,Samp_size1))
+
+
+ACCU_Results=np.zeros((model_lev,Samp_size1))
+ACCU2_Results=np.zeros((model_lev,Samp_size1))
+
+AUChat_Results=np.zeros((model_lev,Samp_size1))
+AUC_Results=np.zeros((model_lev,Samp_size1))
+AUC2_Results=np.zeros((model_lev,Samp_size1))
+AUC_corr_Results=np.zeros((model_lev,Samp_size1))
+AUC_corr_Approx_Results=np.zeros((model_lev,Samp_size1))
+
+#P1_Results=np.zeros(Samp_size1)
+
+group1 = np.arange(ntr)  # grouping variable
+group2= np.arange(ntr)
+for i in range(q1):
+    group1[int(i * ntr / q1):int((i + 1) * ntr / q1)] = i
+    for j in range(q2):
+      Indx1=int(i*(ntr/q1))+int(j * (ntr/q1) / q2)
+      Indx2=int(i*(ntr/q1))+int((j + 1) * (ntr/q1) / q2)
+      group2[Indx1:Indx2] = j
+
+group = np.column_stack((group1, group2))
+
+Z0=np.zeros((ntr,q1+q2))
+for i in range(ntr):
+  G1indx=group1[i]
+  Z0[i,G1indx]=1
+  G2indx=q1+group2[i]
+  Z0[i,G2indx]=1
+
+
+CorrFac=1.5 #2 #0.5
+i1=0
+while i1<Samp_size1:
+    randOrder=np.random.permutation(ntr)-1
+    group_trtot = group[randOrder,:]
+    group1=group_trtot[:,0]
+    group2=group_trtot[:,1]
+    Ztrtot=Z0[randOrder,:]
+
+    Sigma=Ztrtot@Ztrtot.T+np.eye(ntr)*CorrFac  #*0.5 #*2
+    mu=np.zeros(ntr)
+    PHItrtot_full=np.ones(ntr)
+    for i in range(p):
+      Xtrtot=((rng.multivariate_normal(mu,Sigma,1))*0.5).T
+      PHItrtot_full=np.column_stack((PHItrtot_full, Xtrtot))
+
+
+    Str1=rng.standard_normal(q1)*Sig_s1
+    Snew1=rng.standard_normal(q1)*Sig_s1
+
+    Str2=rng.standard_normal(q2)*Sig_s2
+    Snew2=rng.standard_normal(q2)*Sig_s2
+
+    #PHItrtot=np.column_stack((np.ones(ntr), norm.cdf(Xtrtot)-0.5))
+    #PHItrtot=np.column_stack((np.ones(ntr), Xtrtot))
+
+    rand_eff_tot = Str1[group1]+ Str2[group2]
+    rand_eff_tot_new = Snew1[group1]+Snew2[group2]
+
+
+    MUtrtot_new=g(beta*np.sum(PHItrtot_full,1)-beta+rand_eff_tot_new)
+    MUtrtot=g(beta*np.sum(PHItrtot_full,1)-beta+rand_eff_tot)
+    Ytrtot= (np.random.uniform(size=ntr) < MUtrtot).astype(np.float64)   #poisson.ppf(np.random.uniform(size=ntr), mu=MUtrtot)    #poisson.rvs(1,MUtrtot, size=ntr)
+    Ytrtot_new= (np.random.uniform(size=ntr) < MUtrtot_new).astype(np.float64)
+
+    p1=np.mean(Ytrtot)
+    p0=1-p1
+
+
+
+    for mod in range(model_lev):
+      pMod=model_vals[mod]
+      PHItrtot=PHItrtot_full[:,0:pMod]
+
+
+      gp_model = gpb.GPModel(group_data=group_trtot, likelihood=likelihood)
+      gp_model.fit(y=Ytrtot, X=PHItrtot_full, params={"std_dev": False,"maxit":FittingIters })
+
+      Sig_s1_hat=np.sqrt(np.reshape( gp_model.get_cov_pars().to_numpy(),(2)))[0]
+      Sig_s2_hat=np.sqrt(np.reshape( gp_model.get_cov_pars().to_numpy(),(2)))[1]
+
+
+      coefs = gp_model.get_coef().to_numpy()
+      LPtot= PHItrtot_full@(coefs[0])
+
+      if KnownParams:
+        Sig_s1_hat=Sig_s1
+        Sig_s2_hat=Sig_s2
+        Sig_s1_hat_2=Sig_s1
+        Sig_s2_hat_2=Sig_s2
+        p1=0.5
+        p0=0.5
+
+
+      CVhat=0
+
+      ACCU_hat=0
+      ACCU_hat_2=0
+
+
+      Err=0
+      Err2=0
+
+
+      ACCU=0
+      ACCU2=0
+
+      ACCU_2=0
+      ACCU2_2=0
+
+
+      Wcv_Apprx_i1=0
+      Wcv_i1=0
+      Wcv_ACCU_i1=0
+      Wcv_ACCU_Apprx_i1=0
+      Wcv_Vec=np.zeros(Lt)
+      Wcv_Approx_Vec=np.zeros(Lt)
+
+      MusMat=np.zeros((ntr,Samp_size3))
+      Dvec=np.zeros(ntr)
+      for i3 in range(Samp_size3):
+        Stilde1=rng.standard_normal(q1)*Sig_s1_hat
+        Stilde2=rng.standard_normal(q2)*Sig_s2_hat
+        rand_eff_tilde = Stilde1[group1]+ Stilde2[group2]
+        LPtot_WithStilde=LPtot+rand_eff_tilde
+        #Y_tilde=(np.random.uniform(size=ntr) < g(LPtot_WithStilde)).astype(np.float64)   # poisson.ppf(np.random.uniform(size=ntr), mu=g(LPtot+rand_eff_tilde))
+        MusMat[:,i3]=g(LPtot_WithStilde)  #Y_tilde
+        Dvec+=g_tag(LPtot_WithStilde)
+
+
+      Dvec/=Samp_size3
+      CC_mat=np.zeros((2,Samp_size3))
+      WCM=np.zeros((ntr,ntr))
+      for j1 in range(ntr):
+        for j2 in range(ntr):
+          if group1[j1]==group1[j2] or group2[j1]==group2[j2]:
+            CC_mat[0,:]=MusMat[j1,:]
+            CC_mat[1,:]=MusMat[j2,:]
+            WCM[j1,j2]=np.cov(CC_mat)[0,1]
+
+
+      Dtot=np.diag(Dvec)
+      MuVecTot=np.mean(MusMat,axis=1)
+      WCM=WCM+Dtot
+      Preds_CV=np.zeros(ntr)
+      Preds_CV_new=np.zeros(ntr)
+      LP_CV=np.zeros(ntr)
+
+      for k in range(K):       ########################## Spliting the Kth Fold
+        startindx=k*Fsize
+        endindx=startindx+Fsize
+        va_id=np.arange(startindx,endindx)
+
+        PHItr=np.delete(PHItrtot, va_id, axis=0)
+        Ytr=np.delete(Ytrtot, va_id, axis=0)
+        group_tr=np.delete(group_trtot, va_id, axis=0)
+        WCMtr=np.delete(np.delete(WCM, va_id, 0), va_id, 1)
+        WCMtr_inv=np.linalg.inv(WCMtr)
+
+        LPtr=np.delete(LPtot, va_id, axis=0)
+        Dvectr=np.delete(Dvec, va_id, axis=0)
+        MuVectr=np.delete(MuVecTot, va_id, axis=0)
+
+
+        Dtr2=np.diag(Dvectr)
+
+        PHIte=PHItrtot[va_id,:]
+        group_te=group_trtot[va_id,:]
+        MUte_new=MUtrtot_new[va_id]
+        Yte_new=Ytrtot_new[va_id]
+
+        MUte_same=MUtrtot[va_id]
+        Yte=Ytrtot[va_id]
+        LPte=LPtot[va_id]
+        MuVecte=MuVecTot[va_id]
+
+        BetaDevMat=np.linalg.inv(PHItr.T@Dtr2@WCMtr_inv@Dtr2@PHItr)@PHItr.T@Dtr2@WCMtr_inv
+        Hmat_Cond2=PHIte@BetaDevMat
+
+        ################### Fittig the model for Fold k:    ########################################### Fittig the model for Fold k:
+        gp_model_k = gpb.GPModel(group_data=group_tr, likelihood=likelihood)
+        gp_model_k.fit(y=Ytr, X=PHItr, params={"std_dev": False,"maxit":FittingIters})
+
+        coefs_k = gp_model_k.get_coef().to_numpy()
+        LPte_k= PHIte@(coefs_k[0])
+
+        Preds_CV[va_id]=g(LPte_k)
+        LP_CV[va_id]=LPte_k
+
+        CVhat+=np.mean( G(LPte_k)-  Yte*LPte_k )
+        ACCU_hat+=np.sum( (LPte_k>=0)*Yte +(1-Yte)*(LPte_k<0))
+
+        Estimated_rand_eff_k=gp_model_k.predict_training_data_random_effects(predict_var=False) #.to_numpy()[:,0]
+        first_occurences1_k = [np.where(group_tr[:,0]==l)[0][0] for l in np.unique(group_tr[:,0])]
+        training_data_random_effects1_k = Estimated_rand_eff_k.iloc[first_occurences1_k].to_numpy()[:,0]
+        LPte_k_Semi=LPte_k+training_data_random_effects1_k[group_te[:,0]]
+
+
+        Err+=np.mean( G(LPte_k)-  (MUte_new)*LPte_k )
+        ACCU+=np.sum( (LPte_k>=0)*Yte_new +(1-Yte_new)*(LPte_k<0))
+
+
+
+        ######################
+        Snew1_k=rng.standard_normal(q1)*Sig_s1
+        Snew2_k=rng.standard_normal(q2)*Sig_s2
+        rand_eff_tot_new_k = Snew1_k[group1]+Snew2_k[group2]
+        MUtrtot_new_k=g(beta*np.sum(PHItrtot_full,1)-beta+rand_eff_tot_new_k)
+
+        Err2+=np.mean( G(LPte_k)-  (MUtrtot_new_k[va_id])*LPte_k )
+
+
+
+        Ytrtot_new_k=(np.random.uniform(size=ntr) < MUtrtot_new_k).astype(np.float64)
+
+        ACCU2+=np.sum( (LPte_k>=0)*Ytrtot_new_k[va_id] +(1-Ytrtot_new_k[va_id])*(LPte_k<0))
+
+        ############
+        gp_model_k_new = gpb.GPModel(group_data=group_tr, likelihood=likelihood)
+        gp_model_k_new.fit(y=np.delete(Ytrtot_new_k, va_id, axis=0) , X=PHItr, params={"std_dev": False,"maxit":FittingIters})
+
+        coefs_k_new = gp_model_k_new.get_coef().to_numpy()
+        LPte_k_new= PHIte@(coefs_k_new[0])
+        Preds_CV_new[va_id]=g(LPte_k_new)
+
+
+  ########################################## Empirical estimation of Wcv  ################### Empirical estimation of Wcv
+        V_mat=np.zeros((Samp_size2,5,nte))
+        V_mat_Tresholds=np.zeros((Samp_size2,Lt+1,nte))
+        V_mat_Tresholds_Approx=np.zeros((Samp_size2,Lt+1,nte))
+
+        for i2 in range(Samp_size2):
+          Stilde1=rng.standard_normal(q1)*Sig_s1_hat
+          Stilde2=rng.standard_normal(q2)*Sig_s2_hat
+          rand_eff_tot_tilde = Stilde1[group1]+ Stilde2[group2]
+          rand_eff_tr = np.delete(rand_eff_tot_tilde, va_id, axis=0)
+
+          rand_eff_te= rand_eff_tot_tilde[va_id]
+          MUbte=g(LPte+rand_eff_te)
+          V_mat[i2,0,:]=MUbte
+
+          LPTrb=LPtr+rand_eff_tr
+          MUbtr=g(LPTrb)
+          V_mat[i2,1,:]= Hmat_Cond2@MUbtr
+
+
+          Ytr_b= (np.random.uniform(size=n) < MUbtr).astype(np.float64)
+
+          LPte_kb_Approx=LPte+Hmat_Cond2@(Ytr_b-MuVectr)
+          V_mat[i2,3,:]=2*(LPte_kb_Approx>=0)
+
+
+
+          for j3 in range(Lt):
+            V_mat_Tresholds_Approx[i2,j3,:]=(g(LPte_kb_Approx)>=Thresholds_Vec[j3])
+
+          V_mat_Tresholds_Approx[i2,Lt,:]=MUbte
+
+
+        for j in range(Fsize):
+          COV_mat=np.cov(V_mat[:,:,j],rowvar=False,ddof=0)
+          Wcv_Apprx_i1+=COV_mat[0,1]
+          Wcv_ACCU_Apprx_i1+=COV_mat[0,3]
+          COV_mat=np.cov(V_mat_Tresholds_Approx[:,:,j],rowvar=False,ddof=0)
+          Wcv_Approx_Vec+=COV_mat[Lt,0:Lt]
+
+
+      CV_Results[mod,i1]=CVhat/K
+
+      ACCU_hat_Results[mod,i1]=ACCU_hat/ntr
+
+      Err_Results[mod,i1]=Err/K
+      Err2_Results[mod,i1]=Err2/K
+
+
+      ACCU_Results[mod,i1]=ACCU/ntr
+      ACCU2_Results[mod,i1]=ACCU2/ntr
+
+
+      Wcv_Apprx_i1=Wcv_Apprx_i1/ntr
+      Wcv_Apprx_Results[mod,i1]=Wcv_Apprx_i1
+      Wcv_i1=Wcv_i1/ntr
+      Wcv_Results[mod,i1]=Wcv_i1
+      Wcv_ACCU_Results[mod,i1]=Wcv_ACCU_i1/ntr
+      Wcv_ACCU_Apprx_Results[mod,i1]=Wcv_ACCU_Apprx_i1/ntr
+      Wcv_Vec/=ntr
+      Wcv_Approx_Vec/=ntr
+
+
+
+      fpr, tpr, thresholds = metrics.roc_curve(Ytrtot_new,Preds_CV)
+      AUC_Results[mod,i1]=metrics.auc(fpr, tpr)
+
+      fpr, tpr, thresholds = metrics.roc_curve(Ytrtot,Preds_CV_new)
+      AUC2_Results[mod,i1]=metrics.auc(fpr, tpr)
+
+
+      fpr, tpr, thresholds = metrics.roc_curve(Ytrtot,Preds_CV)
+      AUChat_Results[mod,i1]=metrics.auc(fpr, tpr)
+
+
+
+      ################## Correcting the AUC metric:
+      ##### With Wcv Exact:
+      fpr_tilde=np.copy(fpr)
+      tpr_tilde=np.copy(tpr)
+      ##### With Wcv Approx:
+      fpr_berve=np.copy(fpr)
+      tpr_berve=np.copy(tpr)
+
+      Tindx=0
+      for j3 in range(len(thresholds)):
+        if (thresholds[j3]<0.85) and (thresholds[j3]>0.15):
+          while (Thresholds_Vec[Tindx]>thresholds[j3]) and (Tindx<Lt-1) :
+            Tindx+=1
+
+          if Tindx>0:
+            wc=(Wcv_Approx_Vec[Tindx-1]+Wcv_Approx_Vec[Tindx])/2
+            fpr_berve[j3]= np.minimum (np.maximum( fpr_berve[j3]+(1/p0)*wc , fpr_berve[j3-1]),1)
+            tpr_berve[j3]= np.minimum (np.maximum( tpr_berve[j3]-(1/p1)*wc , tpr_berve[j3-1]),1)
+
+        if thresholds[j3]<=0.15:
+          fpr_berve[j3]= np.maximum( fpr_berve[j3] , fpr_berve[j3-1])
+          tpr_berve[j3]= np.maximum( tpr_berve[j3], tpr_berve[j3-1])
+
+
+      AUC_corr_Approx=metrics.auc(fpr_berve, tpr_berve)
+      AUC_corr_Approx_Results[mod,i1]=AUC_corr_Approx
+
+
+
+      if i1%100==99:
+        print('Model number: ',mod)
+        print(i1+1,'samples so far, current time: ',datetime.now().strftime("%H:%M"))
+
+      
+    i1+=1
+
+print('Simulation ended at: ',datetime.now().strftime("%H:%M"))
+
+
+############ Data Saving:
+data=np.stack((CV_Results,Err_Results,Err2_Results,Wcv_Results,Wcv_Apprx_Results,  ACCU_hat_Results,ACCU_Results,ACCU2_Results,Wcv_ACCU_Results,Wcv_ACCU_Apprx_Results,  AUChat_Results,AUC_Results,AUC2_Results,AUC_corr_Results,AUC_corr_Approx_Results ))
+
+####Removing outlayers
+data[~np.isfinite(data)] ='NaN'
+data=data[:, ~np.isnan(data).any(axis=0)]
+
+for j in range(data.shape[0]):
+  Sample=data[j,:]
+  m=np.mean(Sample)
+  Treshold=5*np.std(Sample)
+  L=len(Sample)
+  OutLayers=[]
+  for i in range(L):
+    if np.abs(Sample[i]-m)>Treshold:
+      OutLayers.append(i)
+
+  data=np.delete(data,OutLayers,axis=1)
+
+
+CV_Results=data[0,:]
+Err_Results=data[1,:]
+Err2_Results=data[2,:]
+Wcv_Results=data[3,:]
+Wcv_Apprx_Results=data[4,:]
+ACCU_hat_Results=1-data[5,:]
+ACCU_Results=1-data[6,:]
+ACCU2_Results=1-data[7,:]
+Wcv_ACCU_Results=data[8,:]
+Wcv_ACCU_Apprx_Results=data[9,:]
+AUChat_Results=data[10,:]
+AUC_Results=data[11,:]
+AUC2_Results=data[12,:]
+AUC_corr_Results=data[13,:]
+AUC_corr_Approx_Results=data[14,:]
+
+
+plt.figure(figsize=(17,5))
+plt.subplot(131)
+sns.kdeplot(CV_Results, color='blue')
+CV_corr=CV_Results+Wcv_Results
+CV_Apprx_corr=CV_Results+Wcv_Apprx_Results
+
+sns.kdeplot(CV_Apprx_corr, color='green')
+sns.kdeplot(Err2_Results, color='black',linestyle='dotted')
+
+plt.legend(labels=['CV',r'$\widetilde{CV}_c$','Gen-Err'])
+plt.title('Cross-entropy Loss', fontsize=12 )
+
+plt.axvline(x=np.nanmean(CV_Results),linewidth=2, color='blue')
+plt.axvline(x=np.mean(CV_Apprx_corr),linewidth=1.5, color='green')
+plt.axvline(x=np.mean(Err2_Results),linewidth=2, color='black',linestyle='dotted')
+
+
+cent=np.nanmean(Err2_Results) #TestErr_mean
+width=0.3
+plt.yticks([])
+plt.xlim(cent-width,cent+width)
+plt.xlabel('Error', fontsize=10)
+
+
+
+plt.subplot(132)
+ACCU_corr_Results=ACCU_hat_Results+Wcv_ACCU_Results
+ACCU_Apprx_corr_Results=ACCU_hat_Results+Wcv_ACCU_Apprx_Results
+
+sns.kdeplot(ACCU_hat_Results, color='blue')
+sns.kdeplot(ACCU_Apprx_corr_Results, color='green')
+sns.kdeplot(ACCU2_Results, color='black',linestyle='dotted')
+
+plt.legend(labels=['CV',r'$\widetilde{CV}_c$','Gen-Err'])
+plt.title('Zero-One Loss', fontsize=12 )
+
+plt.axvline(x=np.nanmean(ACCU_hat_Results),linewidth=2, color='blue')
+plt.axvline(x=np.nanmean(ACCU_Apprx_corr_Results),linewidth=1.5, color='green')
+plt.axvline(x=np.mean(ACCU2_Results),linewidth=2, color='black',linestyle='dotted')
+
+
+cent=np.nanmean(ACCU2_Results) #TestErr_mean
+width=0.22
+plt.yticks([])
+plt.xlim(cent-width,cent+width)
+plt.xlabel('Error', fontsize=10)
+
+plt.subplot(133)
+sns.kdeplot(AUChat_Results, color='blue')
+sns.kdeplot(AUC_corr_Approx_Results, color='green')
+sns.kdeplot(AUC2_Results, color='black',linestyle='dotted')
+
+plt.legend(labels=[r'$\widehat{AUC}$',r'$\widetilde{AUC}_c$','Real AUC'])
+plt.title('AUC Estimates', fontsize=12 )
+
+plt.axvline(x=np.nanmean(AUChat_Results),linewidth=2, color='blue')
+plt.axvline(x=np.mean(AUC_corr_Approx_Results),linewidth=1.5, color='green')
+plt.axvline(x=np.mean(AUC2_Results),linewidth=2, color='black',linestyle='dotted')
+
+
+cent=np.nanmean(AUChat_Results) #TestErr_mean
+width=0.25
+plt.xticks([])
+plt.xlim(cent-width,cent+width)
+plt.xlabel('AUC estimation', fontsize=10)
+
+
+plt.suptitle('Error estimation with unknown Variance Components', fontsize=16)
