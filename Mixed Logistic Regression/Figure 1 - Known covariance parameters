@@ -469,6 +469,108 @@ print('Simulation ended at: ',datetime.now().strftime("%H:%M"))
 
 ############ Data Saving:
 data=np.stack((CV_Results,Err_Results,Err2_Results,Wcv_Results,Wcv_Apprx_Results,  ACCU_hat_Results,ACCU_Results,ACCU2_Results,Wcv_ACCU_Results,Wcv_ACCU_Apprx_Results,  AUChat_Results,AUC_Results,AUC2_Results,AUC_corr_Results,AUC_corr_Approx_Results ))
-np.savetxt('/content/drive/MyDrive/Results/MixedLogisticRgression/GPBoost_LogisticReg_With_KnownParams.csv', data , delimiter=",")
+
+####Removing outlayers
+data[~np.isfinite(data)] ='NaN'
+data=data[:, ~np.isnan(data).any(axis=0)]
+
+for j in range(data.shape[0]):
+  Sample=data[j,:]
+  m=np.mean(Sample)
+  Treshold=5*np.std(Sample)
+  L=len(Sample)
+  OutLayers=[]
+  for i in range(L):
+    if np.abs(Sample[i]-m)>Treshold:
+      OutLayers.append(i)
+
+  data=np.delete(data,OutLayers,axis=1)
+
+
+CV_Results=data[0,:]
+Err_Results=data[1,:]
+Err2_Results=data[2,:]
+Wcv_Results=data[3,:]
+Wcv_Apprx_Results=data[4,:]
+ACCU_hat_Results=1-data[5,:]
+ACCU_Results=1-data[6,:]
+ACCU2_Results=1-data[7,:]
+Wcv_ACCU_Results=data[8,:]
+Wcv_ACCU_Apprx_Results=data[9,:]
+AUChat_Results=data[10,:]
+AUC_Results=data[11,:]
+AUC2_Results=data[12,:]
+AUC_corr_Results=data[13,:]
+AUC_corr_Approx_Results=data[14,:]
+
+
+plt.figure(figsize=(17,5))
+plt.subplot(131)
+sns.kdeplot(CV_Results, color='blue')
+CV_corr=CV_Results+Wcv_Results
+CV_Apprx_corr=CV_Results+Wcv_Apprx_Results
+
+sns.kdeplot(CV_Apprx_corr, color='green')
+sns.kdeplot(Err2_Results, color='black',linestyle='dotted')
+
+plt.legend(labels=['CV',r'$\widetilde{CV}_c$','Gen-Err'])
+plt.title('Cross-entropy Loss', fontsize=12 )
+
+plt.axvline(x=np.nanmean(CV_Results),linewidth=2, color='blue')
+plt.axvline(x=np.mean(CV_Apprx_corr),linewidth=1.5, color='green')
+plt.axvline(x=np.mean(Err2_Results),linewidth=2, color='black',linestyle='dotted')
+
+
+cent=np.nanmean(Err2_Results) #TestErr_mean
+width=0.3
+plt.yticks([])
+plt.xlim(cent-width,cent+width)
+plt.xlabel('Error', fontsize=10)
+
+
+
+plt.subplot(132)
+ACCU_corr_Results=ACCU_hat_Results+Wcv_ACCU_Results
+ACCU_Apprx_corr_Results=ACCU_hat_Results+Wcv_ACCU_Apprx_Results
+
+sns.kdeplot(ACCU_hat_Results, color='blue')
+sns.kdeplot(ACCU_Apprx_corr_Results, color='green')
+sns.kdeplot(ACCU2_Results, color='black',linestyle='dotted')
+
+plt.legend(labels=['CV',r'$\widetilde{CV}_c$','Gen-Err'])
+plt.title('Zero-One Loss', fontsize=12 )
+
+plt.axvline(x=np.nanmean(ACCU_hat_Results),linewidth=2, color='blue')
+plt.axvline(x=np.nanmean(ACCU_Apprx_corr_Results),linewidth=1.5, color='green')
+plt.axvline(x=np.mean(ACCU2_Results),linewidth=2, color='black',linestyle='dotted')
+
+
+cent=np.nanmean(ACCU2_Results) #TestErr_mean
+width=0.22
+plt.yticks([])
+plt.xlim(cent-width,cent+width)
+plt.xlabel('Error', fontsize=10)
+
+plt.subplot(133)
+sns.kdeplot(AUChat_Results, color='blue')
+sns.kdeplot(AUC_corr_Approx_Results, color='green')
+sns.kdeplot(AUC2_Results, color='black',linestyle='dotted')
+
+plt.legend(labels=[r'$\widehat{AUC}$',r'$\widetilde{AUC}_c$','Real AUC'])
+plt.title('AUC Estimates', fontsize=12 )
+
+plt.axvline(x=np.nanmean(AUChat_Results),linewidth=2, color='blue')
+plt.axvline(x=np.mean(AUC_corr_Approx_Results),linewidth=1.5, color='green')
+plt.axvline(x=np.mean(AUC2_Results),linewidth=2, color='black',linestyle='dotted')
+
+
+cent=np.nanmean(AUChat_Results) #TestErr_mean
+width=0.25
+plt.xticks([])
+plt.xlim(cent-width,cent+width)
+plt.xlabel('AUC estimation', fontsize=10)
+
+
+plt.suptitle('Error estimation with known Variance Components', fontsize=16)
 
 
