@@ -1,0 +1,340 @@
+import numpy as np
+from numpy.random import default_rng
+from scipy.stats import norm
+from scipy.stats import binom
+from scipy.stats import poisson
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.neighbors import KernelDensity
+from datetime import datetime
+
+rng = default_rng()
+
+pip install gpboost -U
+
+import gpboost as gpb
+import math
+from scipy import stats
+
+
+########### Setting:
+p=20 #40
+q1= 10 #30
+q2=5
+n=100
+
+beta=0.2 #0.15
+Sig_s1= 0.7
+Sig_s2= 0.4
+#Sig_eps=0.5 #1
+
+mu=np.zeros(p)
+Sigma=np.eye(p)
+
+############ Definition for the Link Function
+a=1
+
+
+def g(z):
+    #return z*(z>0)+(z<0)*a*(np.exp(z/a)-1) ELU
+    #return 1/(1+np.exp(-z)) ## Zigmoid
+    return np.exp(z) ## Poisson
+
+
+def g_inv(z):
+    #return z*(z>0)+(z<0)*a*np.log(z/a+1) ## ELU-inv
+    #return np.log(z/(1-z)) ##Zigmoid_inv
+    return np.log(z) ## Poisson_inv
+
+def g_tag(z):
+    #return 1*(z>0)+(z<0)*np.exp(z/a) ## ELU-tag
+    #return np.exp(-z)/(1+np.exp(-z))**2 ## Zigmoid-tag
+    return np.exp(z) ## Poisson
+
+
+def g_tag_tag(z):
+    return np.exp(z) ## Poisson
+
+
+def G(z):
+    #return (z>0)*0.5*z**2+(z<0)*(a**2)*(np.exp(z/a)-z/a-1) ## ELU-Prime
+    #return np.log(1+np.exp(z)) ## Zigmoid Prime
+    return np.exp(z) ## Poisson
+
+
+
+
+
+################## Full Simulation  - After ExConv Change - Only Semi's: ##############
+Samp_size1= 100
+Samp_size2=20 # 2*10**2
+Samp_size22=30
+Samp_size3=2*10**3
+FittingIters=500
+
+print('Simulation started at: ',datetime.now().strftime("%H:%M"))
+
+ntr=110
+K=11
+Fsize=10
+nte=Fsize
+
+
+CV_Results=np.zeros(Samp_size1)
+CV_Semi_Results=np.zeros(Samp_size1)
+
+Wcv_Semi_Results=np.zeros(Samp_size1)
+
+Err_Results=np.zeros(Samp_size1)
+Err2_Results=np.zeros(Samp_size1)
+
+Err_Semi_Results=np.zeros(Samp_size1)
+Err2_Semi_Results=np.zeros(Samp_size1)
+
+Wcv_Apprx_Semi1_Results=np.zeros(Samp_size1)
+Wcv_Apprx_Semi2_Results=np.zeros(Samp_size1)
+
+
+
+
+
+likelihood = "poisson"
+group1 = np.arange(ntr)  # grouping variable
+group2= np.arange(ntr)
+for i in range(q1):
+    group1[int(i * ntr / q1):int((i + 1) * ntr / q1)] = i
+    for j in range(q2):
+      Indx1=int(i*(ntr/q1))+int(j * (ntr/q1) / q2)
+      Indx2=int(i*(ntr/q1))+int((j + 1) * (ntr/q1) / q2)
+      group2[Indx1:Indx2] = j
+
+group = np.column_stack((group1, group2))
+
+Z0=np.zeros((ntr,q1+q2))
+for i in range(ntr):
+  G1indx=group1[i]
+  Z0[i,G1indx]=1
+  G2indx=q1+group2[i]
+  Z0[i,G2indx]=1
+
+for i1 in range(Samp_size1):
+    Xtrtot=rng.multivariate_normal(mu,Sigma,ntr)
+    Str1=rng.standard_normal(q1)*Sig_s1
+    Snew1=rng.standard_normal(q1)*Sig_s1
+
+    Str2=rng.standard_normal(q2)*Sig_s2
+    Snew2=rng.standard_normal(q2)*Sig_s2
+
+    PHItrtot=np.column_stack((np.ones(ntr), norm.cdf(Xtrtot)-0.5))
+
+    randOrder=np.random.permutation(ntr)-1
+    group_trtot = group[randOrder,:]
+    group1=group_trtot[:,0]
+    group2=group_trtot[:,1]
+    Ztrtot=Z0[randOrder,:]
+
+
+    rand_eff_tot = Str1[group1]+ Str2[group2]
+    rand_eff_tot_new = Snew1[group1]+Snew2[group2]
+    rand_eff_tot_HalfNew = Str1[group1]+Snew2[group2]
+
+    MUtrtot_new=g(beta*np.sum(PHItrtot,1)+rand_eff_tot_new)
+    MUtrtot_HalfNew=g(beta*np.sum(PHItrtot,1)+rand_eff_tot_HalfNew)
+    MUtrtot=g(beta*np.sum(PHItrtot,1)+rand_eff_tot)
+    Ytrtot= poisson.ppf(np.random.uniform(size=ntr), mu=MUtrtot)    #poisson.rvs(1,MUtrtot, size=ntr)
+
+
+    gp_model = gpb.GPModel(group_data=group_trtot, likelihood=likelihood)
+    gp_model.fit(y=Ytrtot, X=PHItrtot, params={"std_dev": False,"maxit":FittingIters})
+
+    Sig_s1_hat=np.sqrt(np.reshape( gp_model.get_cov_pars().to_numpy(),(2)))[0]
+    Sig_s2_hat=np.sqrt(np.reshape( gp_model.get_cov_pars().to_numpy(),(2)))[1]
+    vs1=np.zeros(q1)+Sig_s1_hat**2
+    vs2=np.zeros(q2)+Sig_s2_hat**2
+    vs=np.hstack((vs1,vs2))
+    Vs=np.diag(vs)
+
+
+    coefs = gp_model.get_coef().to_numpy()
+    LPtot= PHItrtot@(coefs[0])
+    #LPtot_WithS=gp_model.predict(X_pred=PHItrtot, group_data_pred=group_trtot,predict_var=False, predict_response=False)['mu']
+    #Estimated_rand_eff_tot=gp_model.predict_training_data_random_effects(predict_var=False) #.to_numpy()[:,0]
+    #Estimated_Semi_rand_eff_tot=Estimated_rand_eff_tot.to_numpy()[:,0]
+
+
+
+    CVhat=0
+    CVhat_Semi=0
+
+    Wcv_Semi=0
+    Wcv_Apprx_Semi1=0
+    Wcv_Apprx_Semi2=0
+
+    Err=0
+    Err2=0
+    Err_Semi=0
+    Err2_Semi=0
+
+    MusMat=np.zeros((ntr,Samp_size3))
+    Dvec=np.zeros(ntr)
+    MuVec=np.zeros(ntr)
+    for i3 in range(Samp_size3):
+      Stilde1=rng.standard_normal(q1)*Sig_s1_hat
+      Stilde2=rng.standard_normal(q2)*Sig_s2_hat
+      rand_eff_tilde = Stilde1[group1]+ Stilde2[group2]
+      Y_tilde= poisson.ppf(np.random.uniform(size=ntr), mu=g(LPtot+rand_eff_tilde))
+      MusMat[:,i3]=Y_tilde
+      Dvec+=g_tag(LPtot+rand_eff_tilde)
+      MuVec+=g(LPtot+rand_eff_tilde)
+
+
+    Dvec/=Samp_size3
+    MuVec/=Samp_size3
+    CC_mat=np.zeros((2,Samp_size3))
+    WCM=np.zeros((ntr,ntr))
+    for j1 in range(ntr):
+      for j2 in range(ntr):
+        if group1[j1]==group1[j2] or group2[j1]==group2[j2]:
+          CC_mat[0,:]=MusMat[j1,:]
+          CC_mat[1,:]=MusMat[j2,:]
+          WCM[j1,j2]=np.cov(CC_mat)[0,1]
+
+
+
+
+    for k in range(K):
+      startindx=k*Fsize
+      endindx=startindx+Fsize
+      va_id=np.arange(startindx,endindx)
+
+      PHItr=np.delete(PHItrtot, va_id, axis=0)
+      Ztr=np.delete(Ztrtot, va_id, axis=0)
+      Ytr=np.delete(Ytrtot, va_id, axis=0)
+      group_tr=np.delete(group_trtot, va_id, axis=0)
+      WCMtr=np.delete(np.delete(WCM, va_id, 0), va_id, 1)
+      WCMtr_inv=np.linalg.inv(WCMtr)
+
+      LPtr=np.delete(LPtot, va_id, axis=0)
+      #LPtr_WithS=np.delete(LPtot_WithS, va_id, axis=0)
+      #Estimated_Semi_rand_eff_tr=np.delete(Estimated_Semi_rand_eff_tot, va_id, axis=0)
+      Dvectr=np.delete(Dvec, va_id, axis=0)
+      MuVectr=np.delete(MuVec, va_id, axis=0)
+      Dtr2=np.diag(Dvectr)
+      #Dtr_WithFullS=np.diag(g_tag(LPtr_WithS))
+
+
+      PHIte=PHItrtot[va_id,:]
+      Zte=Ztrtot[va_id,0:q1]
+      group_te=group_trtot[va_id,:]
+      MUte_new=MUtrtot_new[va_id]
+      MUte_HalfNew=MUtrtot_HalfNew[va_id]
+      MUte_same=MUtrtot[va_id]
+      Yte=Ytrtot[va_id]
+      LPte=LPtot[va_id]
+      #LPte_WithS=LPtot_WithS[va_id]
+      #Estimated_Semi_rand_eff_te=Estimated_Semi_rand_eff_tot[va_id]
+
+
+      BetaDevMat=np.linalg.inv(PHItr.T@Dtr2@WCMtr_inv@Dtr2@PHItr)@PHItr.T@Dtr2@WCMtr_inv
+      HmatX=PHItr@BetaDevMat
+      Hmat_Cond2=PHIte@BetaDevMat
+
+      ################### Fittig the model for Fold k:    ########################################### Fittig the model for Fold k:
+      gp_model_k = gpb.GPModel(group_data=group_tr, likelihood=likelihood)
+      gp_model_k.fit(y=Ytr, X=PHItr, params={"std_dev": True,"maxit":FittingIters})
+      coefs_k = gp_model_k.get_coef().to_numpy()
+      LPte_k= PHIte@(coefs_k[0])
+      CVhat+=np.mean( G(LPte_k)-  Yte*LPte_k )
+
+      Estimated_rand_eff_k=gp_model_k.predict_training_data_random_effects(predict_var=False) #.to_numpy()[:,0]
+      first_occurences1_k = [np.where(group_tr[:,0]==l)[0][0] for l in np.unique(group_tr[:,0])]
+      training_data_random_effects1_k = Estimated_rand_eff_k.iloc[first_occurences1_k].to_numpy()[:,0]
+      LPte_k_Semi=LPte_k+training_data_random_effects1_k[group_te[:,0]]
+
+      ########### Evaluating Error quantities for Fold k:
+      CVhat_Semi+=np.mean( G(LPte_k_Semi)-  Yte*LPte_k_Semi )
+      Err+=np.mean( G(LPte_k)-  MUte_new*LPte_k )
+      Err_Semi+=np.mean( G(LPte_k_Semi)-  (MUte_HalfNew)*LPte_k_Semi )
+
+
+      Snew1_k=rng.standard_normal(q1)*Sig_s1
+      Snew2_k=rng.standard_normal(q2)*Sig_s2
+      rand_eff_tot_new_k = Snew1_k[group1]+Snew2_k[group2]
+      MUtrtot_new_k=g(beta*np.sum(PHItrtot,1)+rand_eff_tot_new_k)
+      Err2+=np.mean( G(LPte_k)-  (MUtrtot_new_k[va_id])*LPte_k )
+
+      rand_eff_tot_new_k = Snew2_k[group2]
+      MUtrtot_new_k=g(beta*np.sum(PHItrtot,1)+Str1[group1]+rand_eff_tot_new_k)
+      Err2_Semi+=np.mean( G(LPte_k_Semi)-  (MUtrtot_new_k[va_id])*LPte_k_Semi )
+      #LPtr_k= PHItr@(coefs_k[0])
+
+
+ ########################################## Empirical estimation of Semi-Wcv  ################### Empirical estimation of Semi-Wcv
+      V_Hat_Sh_mat_Cond=np.zeros((Samp_size2,4,Samp_size22,nte))
+
+      for i2 in range(Samp_size2):
+        Stilde1=rng.standard_normal(q1)*Sig_s1_hat
+        for i22 in range(Samp_size22):
+          Stilde2=rng.standard_normal(q2)*Sig_s2_hat
+          rand_eff_tot_tilde = Stilde1[group1]+ Stilde2[group2]
+          rand_eff_tr = np.delete(rand_eff_tot_tilde, va_id, axis=0)
+          rand_eff_te= rand_eff_tot_tilde[va_id]
+          MUbte=g(LPte+rand_eff_te)
+          V_Hat_Sh_mat_Cond[i2,0,i22,:]=MUbte
+
+          LPTrb=LPtr+rand_eff_tr
+          MUbtr=g(LPTrb)                                                     ############With/out _k
+          Dtr_tilde=np.diag(g_tag(LPTrb))
+
+          HmatS2=Zte@((np.linalg.inv(Ztr.T@Dtr_tilde@Ztr+np.linalg.inv(Vs))@Ztr.T)[0:q1,:])
+          V_Hat_Sh_mat_Cond[i2,1,i22,:]= Hmat_Cond2@MUbtr
+          V_Hat_Sh_mat_Cond[i2,2,i22,:]= HmatS2@Dtr_tilde@HmatX@(MUbtr-MuVectr)
+
+
+          Ytr_b= poisson.ppf(np.random.uniform(size=n), mu=MUbtr)
+          gp_model_kb = gpb.GPModel(group_data=group_tr, likelihood=likelihood)
+          gp_model_kb.fit(y=Ytr_b, X=PHItr, params={"std_dev": False,"maxit":FittingIters})
+          coefs = gp_model_kb.get_coef().to_numpy()
+          LPb= PHIte@(coefs[0])
+          Estimated_rand_eff_kb=gp_model_kb.predict_training_data_random_effects(predict_var=False)
+          training_data_random_effects1_kb = Estimated_rand_eff_kb.iloc[first_occurences1_k].to_numpy()[:,0]
+          LPte_kb_Semi=LPb+training_data_random_effects1_kb[group_te[:,0]]
+
+          V_Hat_Sh_mat_Cond[i2,3,i22,:]=LPte_kb_Semi
+
+
+      for j in range(Fsize):
+        for i2 in range(Samp_size2):
+          Cmat=np.cov(V_Hat_Sh_mat_Cond[i2,:,:,j])
+          Wcv_Apprx_Semi1+=Cmat[0,1]
+          Wcv_Apprx_Semi2+=Cmat[0,2]
+          Wcv_Semi+=Cmat[0,3]
+
+
+
+
+    CV_Results[i1]=CVhat/K
+    CV_Semi_Results[i1]=CVhat_Semi/K
+    Err_Results[i1]=Err/K
+    Err2_Results[i1]=Err2/K
+
+    Err_Semi_Results[i1]=Err_Semi/K
+    Err2_Semi_Results[i1]=Err2_Semi/K
+
+
+    Wcv_Semi_Results[i1]=Wcv_Semi/(ntr*Samp_size2)
+    Wcv_Apprx_Semi1_Results[i1]=Wcv_Apprx_Semi1/(ntr*Samp_size2)
+    Wcv_Apprx_Semi2_Results[i1]=Wcv_Apprx_Semi2/(ntr*Samp_size2)
+
+
+
+    if i1%10==9:
+      print(i1+1,'samples so far, current time: ',datetime.now().strftime("%H:%M"))
+
+  
+
+
+
+
+
+
