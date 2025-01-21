@@ -467,7 +467,7 @@ while i1<Samp_size1:
 print('Simulation ended at: ',datetime.now().strftime("%H:%M"))
 
 
-############ Data Saving:
+############ Data:
 data=np.stack((CV_Results,Err_Results,Err2_Results,Wcv_Results,Wcv_Apprx_Results,  ACCU_hat_Results,ACCU_Results,ACCU2_Results,Wcv_ACCU_Results,Wcv_ACCU_Apprx_Results,  AUChat_Results,AUC_Results,AUC2_Results,AUC_corr_Results,AUC_corr_Approx_Results ))
 
 ####Removing outlayers
@@ -488,20 +488,20 @@ for j in range(data.shape[0]):
 
 
 CV_Results=data[0,:]
-Err_Results=data[1,:]
-Err2_Results=data[2,:]
-Wcv_Results=data[3,:]
-Wcv_Apprx_Results=data[4,:]
-ACCU_hat_Results=1-data[5,:]
-ACCU_Results=1-data[6,:]
-ACCU2_Results=1-data[7,:]
-Wcv_ACCU_Results=data[8,:]
-Wcv_ACCU_Apprx_Results=data[9,:]
-AUChat_Results=data[10,:]
-AUC_Results=data[11,:]
-AUC2_Results=data[12,:]
-AUC_corr_Results=data[13,:]
-AUC_corr_Approx_Results=data[14,:]
+Err_Results=data[1*model_lev,:]
+Err2_Results=data[2*model_lev,:]
+Wcv_Results=data[3*model_lev,:]
+Wcv_Apprx_Results=data[4*model_lev,:]
+ACCU_hat_Results=1-data[5*model_lev,:]
+ACCU_Results=1-data[6*model_lev,:]
+ACCU2_Results=1-data[7*model_lev,:]
+Wcv_ACCU_Results=data[8*model_lev,:]
+Wcv_ACCU_Apprx_Results=data[9*model_lev,:]
+AUChat_Results=data[10*model_lev,:]
+AUC_Results=data[11*model_lev,:]
+AUC2_Results=data[12*model_lev,:]
+AUC_corr_Results=data[13*model_lev,:]
+AUC_corr_Approx_Results=data[14*model_lev,:]
 
 
 plt.figure(figsize=(17,5))
