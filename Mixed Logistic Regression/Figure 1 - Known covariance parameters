@@ -468,7 +468,7 @@ print('Simulation ended at: ',datetime.now().strftime("%H:%M"))
 
 
 ############ Data:
-data=np.stack((CV_Results,Err_Results,Err2_Results,Wcv_Results,Wcv_Apprx_Results,  ACCU_hat_Results,ACCU_Results,ACCU2_Results,Wcv_ACCU_Results,Wcv_ACCU_Apprx_Results,  AUChat_Results,AUC_Results,AUC2_Results,AUC_corr_Results,AUC_corr_Approx_Results ))
+data=np.vstack((CV_Results,Err_Results,Err2_Results,Wcv_Results,Wcv_Apprx_Results,  ACCU_hat_Results,ACCU_Results,ACCU2_Results,Wcv_ACCU_Results,Wcv_ACCU_Apprx_Results,  AUChat_Results,AUC_Results,AUC2_Results,AUC_corr_Results,AUC_corr_Approx_Results ))
 
 ####Removing outlayers
 data[~np.isfinite(data)] ='NaN'
