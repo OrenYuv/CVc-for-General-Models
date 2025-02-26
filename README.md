@@ -1,7 +1,9 @@
 # CVc-for-General-Models
-This repository contains the code associated with Chapter 4 of my Ph.D. dissertation, titled "Cross-validation for correlated data in general models for regression and classification, with applications to Deep Learning". These codes also encompass the empirical analysis presented in the paper "Cross Validation for Correlated Data in Classification Models" authored by Oren Yuval and Saharon Rosset, which was recently accepted to the 28th International Conference on Artificial Intelligence and Statistics (2025).
+This repository contains the code associated with the arXiv paper: "Cross Validation for Correlated Data in Regression and Classification Models, with Applications to Deep Learning" by Yuval and Rosset (2025), https://doi.org/10.48550/arXiv.2502.14808.
 
-It should be noted that the numbering of figures differs between the conference paper and this repository, which matches with Chapter 4 of the Ph.D. dissertation. Specifically, Figures 1 to 4 in the paper correspond to Figures 1, 3, 6, and 7 in this repository, respectively.
+This paper is an expanded version of the published conference paper "Cross Validation for Correlated Data in Classification Models" authored by Oren Yuval and Saharon Rosset, which was recently accepted to the 28th International Conference on Artificial Intelligence and Statistics (2025).
+
+It should be noted that the numbering of figures differs between the conference paper and this repository, which matches with the arXiv paper. Specifically, Figures 1 to 4 in the conference paper correspond to Figures 1, 3, 6, and 7 in this repository, respectively.
 
 
 
